@@ -10,6 +10,12 @@ from src.schemas.developer import (
     DeveloperRegistrationResponse,
     DeveloperResponse,
 )
+from src.schemas.model import (
+    HardwareInfoResponse,
+    ModelMetadataResponse,
+    ModelStatusResponse,
+    ModelUnloadResponse,
+)
 from src.schemas.usage import UsageRecordResponse, UsageSummaryResponse
 
 __all__ = [
@@ -21,4 +27,8 @@ __all__ = [
     "APIKeyCreatedResponse",
     "UsageRecordResponse",
     "UsageSummaryResponse",
+    "ModelMetadataResponse",
+    "ModelStatusResponse",
+    "HardwareInfoResponse",
+    "ModelUnloadResponse",
 ]

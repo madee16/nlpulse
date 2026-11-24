@@ -2,7 +2,7 @@
 
 from typing import AsyncGenerator, List, Optional
 
-from fastapi import Depends, Header, HTTPException, Security
+from fastapi import Depends, Header, HTTPException, Request, Security
 from fastapi.security.api_key import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ from src.models.api_key import APIKey
 from src.models.developer import Developer
 from src.services.api_key_service import APIKeyService
 from src.services.developer_service import DeveloperService
+from src.services.model_registry import ModelRegistry, model_registry
 from src.services.usage_service import UsageService
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -81,3 +82,11 @@ async def check_rate_limit(
     is_allowed, retry_after = await rate_limiter.check(api_key.key_hash)
     if not is_allowed:
         raise RateLimitExceededError(retry_after=retry_after)
+
+
+def get_model_registry(request: Request) -> ModelRegistry:
+    """Provide the application-scoped ModelRegistry instance from state or fallback to default."""
+    if hasattr(request.app.state, "model_registry") and request.app.state.model_registry:
+        return request.app.state.model_registry
+    return model_registry
+

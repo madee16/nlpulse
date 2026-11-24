@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "nlpulse"
     DATABASE_URL: Optional[str] = None
 
+    # Model Lifecycle Management (M3)
+    MODEL_DEVICE_PREFERENCE: str = "auto"  # "auto", "cuda", "cpu"
+    MODEL_MAX_CACHED: int = 3
+    MODEL_DEFAULT_CONCURRENCY: int = 2
+    MODEL_INFERENCE_TIMEOUT_SECONDS: float = 30.0
+    MODEL_ENABLE_WARMUP: bool = False
+
     # CORS
     CORS_ORIGINS: Union[List[str], str] = ["*"]
 

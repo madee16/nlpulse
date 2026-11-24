@@ -10,11 +10,12 @@
 
 ---
 
-## Current Status: M1 & M2 Complete ✅
+## Current Status: M1, M2 & M3 Complete ✅
 
 - ✅ **M1: Foundations & Database** — Project structure, PostgreSQL 16, async SQLAlchemy 2.x session lifecycle, models (`Developer`, `APIKey`, `UsageRecord`), and Alembic async migrations.
-- ✅ **M2: Security & Authentication** — API keys, SHA-256 constant-time hashing, scope enforcement, sliding window rate limiting, monthly database quotas, and tenant isolation (44/44 tests passing).
-- ⏳ **M3: Model Lifecycle Management** — Ready for kickoff (Model loading, caching, GPU/CPU management, concurrency).
+- ✅ **M2: Security & Authentication** — API keys, SHA-256 constant-time hashing, scope enforcement, sliding window rate limiting, monthly database quotas, and tenant isolation.
+- ✅ **M3: Model Lifecycle Management** — Lazy model initialization, thread-safe `ModelRegistry`, LRU eviction with in-use protection, hardware detection (`DeviceManager` for CUDA GPU/CPU), per-model concurrency control, event-loop offloading via `asyncio.to_thread`, and FastAPI lifespan integration (72/72 tests passing).
+- ⏳ **M4: Core NLP** — Next: Sentiment analysis, Named Entity Recognition (NER), zero-shot classification.
 
 ---
 
@@ -63,16 +64,20 @@
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── config.py         # Pydantic Settings & environment variables
-│   │   ├── exceptions.py     # Domain exceptions (Auth, Quota, RateLimit, Conflict)
+│   │   ├── device.py         # Hardware detection, CUDA GPU/CPU & VRAM telemetry
+│   │   ├── exceptions.py     # Domain exceptions (Auth, Quota, RateLimit, Model, Device)
 │   │   ├── logging.py        # Structured JSON & console logging
-│   │   ├── rate_limiter.py   # Thread-safe in-memory sliding window rate limiter
+│   │   ├── models/           # Standardized model lifecycle base abstractions
+│   │   │   ├── __init__.py
+│   │   │   └── base.py       # BaseModel, ModelMetadata, ModelState, concurrency guards
+│   │   ├── rate_limiter.py   # Thread-safe striped sliding window rate limiter
 │   │   └── security.py       # SHA-256 API key hashing & constant-time comparison
 │   ├── db/
 │   │   ├── __init__.py
 │   │   ├── base.py           # Declarative base & metadata registry
 │   │   └── session.py        # Async engine & sessionmaker
 │   ├── models/
-│   │   ├── __init__.py       # Model exports
+│   │   ├── __init__.py       # Database model exports
 │   │   ├── api_key.py        # APIKey model & hash indexing
 │   │   ├── developer.py      # Developer tenant root model
 │   │   └── usage_record.py   # UsageRecord metering & audit model
@@ -80,11 +85,13 @@
 │   │   ├── __init__.py
 │   │   ├── api_key.py        # API key request/response schemas
 │   │   ├── developer.py      # Developer registration/profile schemas
+│   │   ├── model.py          # Model telemetry & hardware metrics schemas
 │   │   └── usage.py          # Usage summary schemas
 │   └── services/
 │       ├── __init__.py
 │       ├── api_key_service.py   # Key issuance, hashing, and auth
 │       ├── developer_service.py # Tenant management & quota assignment
+│       ├── model_registry.py    # Lazy loading, LRU caching, eviction & locks
 │       └── usage_service.py     # Metering & calendar month quota checks
 └── tests/
     ├── __init__.py
@@ -92,22 +99,27 @@
     ├── integration/
     │   ├── __init__.py
     │   ├── test_auth_api.py   # End-to-end API registration, auth, and scopes
-    │   └── test_migrations.py # Alembic upgrade/downgrade integration tests
+    │   ├── test_migrations.py # Alembic upgrade/downgrade integration tests
+    │   └── test_models_api.py # Model registry and hardware telemetry API tests
     └── unit/
         ├── __init__.py
         ├── test_config.py     # Configuration tests
+        ├── test_device.py     # Hardware detection & CUDA fallback tests
         ├── test_health.py     # Health check endpoint tests
         ├── test_logging.py    # Structured logging tests
+        ├── test_model_abstraction.py # BaseModel lifecycle, semaphore & offloading tests
+        ├── test_model_registry.py    # Lazy load, per-model lock & LRU cache tests
         ├── test_models.py     # Model relationships, constraints, cascades
         ├── test_rate_limiter.py # Sliding window rate limiter tests
         ├── test_security.py   # Cryptographic API key tests
+        ├── test_security_audit_regression.py # Security audit regression tests
         ├── test_services.py   # Business services unit tests
         └── test_tenant_isolation.py # Multi-tenant isolation tests
 ```
 
 ---
 
-## API Endpoints (Milestones 1 & 2)
+## API Endpoints (Milestones 1, 2 & 3)
 
 | Method | Endpoint | Auth Required | Description |
 | :--- | :--- | :--- | :--- |
@@ -121,6 +133,10 @@
 | `GET` | `/api/v1/usage/summary` | `X-API-Key` | Monthly quota consumption & remaining requests |
 | `GET` | `/api/v1/protected/sentiment` | `X-API-Key` | Protected route requiring `sentiment:read` |
 | `GET` | `/api/v1/protected/admin-only` | `X-API-Key` | Protected route requiring `admin` |
+| `GET` | `/api/v1/models` | `X-API-Key` | List registered models and operational status (`models:read` / `admin`) |
+| `GET` | `/api/v1/models/{model_id}` | `X-API-Key` | Retrieve model telemetry and loading state (`models:read` / `admin`) |
+| `POST` | `/api/v1/models/{model_id}/unload` | `X-API-Key` | Explicitly unload model and release GPU/RAM (`admin`) |
+| `GET` | `/api/v1/hardware` | `X-API-Key` | Inspect compute hardware, GPU availability, and VRAM (`admin`) |
 
 ---
 
@@ -222,7 +238,7 @@ tests/unit/test_services.py::test_api_key_expired_rejection PASSED
 tests/unit/test_services.py::test_usage_service_quota_enforcement PASSED
 tests/unit/test_tenant_isolation.py::test_tenant_isolation_api_keys PASSED
 tests/unit/test_tenant_isolation.py::test_tenant_isolation_usage_records PASSED
-============================= 39 passed in 3.72s =============================
+============================= 72 passed in 7.44s ==============================
 ```
 
 ---
@@ -233,8 +249,8 @@ tests/unit/test_tenant_isolation.py::test_tenant_isolation_usage_records PASSED
 | :--- | :--- | :--- | :--- |
 | **M1** | Foundations & Database | Project structure, PostgreSQL, SQLAlchemy, models, migrations | ✅ Complete |
 | **M2** | Security & Authentication | API keys, authentication, scopes, rate limiting, quotas | ✅ Complete |
-| **M3** | Model Lifecycle Management | Model loading, caching, GPU/CPU management, concurrency | ⏳ Next |
-| **M4** | Core NLP | Sentiment analysis, NER, zero-shot classification | 📋 Planned |
+| **M3** | Model Lifecycle Management | Model loading, caching, GPU/CPU management, concurrency | ✅ Complete |
+| **M4** | Core NLP | Sentiment analysis, NER, zero-shot classification | ⏳ Next |
 | **M5** | Advanced NLP | Keyword extraction, summarization | 📋 Planned |
 | **M6** | Generative NLP | Ollama integration, structured information extraction | 📋 Planned |
 | **M7** | Batch Processing | Efficient multi-text inference and benchmarking | 📋 Planned |

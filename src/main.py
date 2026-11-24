@@ -11,12 +11,15 @@ from starlette.responses import JSONResponse, Response
 from src.api.routes.developers import router as developers_router
 from src.api.routes.health import router as health_router
 from src.api.routes.keys import router as keys_router
+from src.api.routes.models import router as models_router
 from src.api.routes.protected import router as protected_router
 from src.api.routes.usage import router as usage_router
 from src.core.config import get_settings
+from src.core.device import DeviceManager
 from src.core.exceptions import NLPulseException, RateLimitExceededError
 from src.core.logging import get_logger, setup_logging
 from src.db.session import engine
+from src.services.model_registry import ModelRegistry
 
 settings = get_settings()
 logger = get_logger("nlpulse.main")
@@ -38,16 +41,29 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan context manager for startup and shutdown events."""
     setup_logging(log_level=settings.LOG_LEVEL, log_format=settings.LOG_FORMAT)
+
+    # Initialize compute device and model registry in application state
+    device_mgr = DeviceManager(preference=settings.MODEL_DEVICE_PREFERENCE)
+    registry = ModelRegistry(device_mgr=device_mgr, max_cached_models=settings.MODEL_MAX_CACHED)
+    app.state.device_manager = device_mgr
+    app.state.model_registry = registry
+
+    hw = device_mgr.get_hardware_info()
     logger.info(
         "NLPulse service starting up",
         extra={
             "app_name": settings.APP_NAME,
             "version": settings.APP_VERSION,
             "env": settings.APP_ENV,
+            "device": hw.device_type,
+            "cuda_available": hw.cuda_available,
+            "device_name": hw.device_name,
         },
     )
     yield
     logger.info("NLPulse service shutting down")
+    if hasattr(app.state, "model_registry") and app.state.model_registry:
+        await app.state.model_registry.unload_all()
     await engine.dispose()
 
 
@@ -101,6 +117,7 @@ def create_application() -> FastAPI:
     app.include_router(health_router)  # root convenience
     app.include_router(developers_router, prefix=settings.API_V1_PREFIX)
     app.include_router(keys_router, prefix=settings.API_V1_PREFIX)
+    app.include_router(models_router, prefix=settings.API_V1_PREFIX)
     app.include_router(usage_router, prefix=settings.API_V1_PREFIX)
     app.include_router(protected_router, prefix=settings.API_V1_PREFIX)
 
