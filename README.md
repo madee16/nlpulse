@@ -10,10 +10,12 @@
 
 ---
 
-## Current Status: M1 · Task 1.2
+## Current Status: Milestone 1 Complete ✅
 
+**Milestone 1 — Foundations, Database & API Security:**
 - ✅ **M1 · Task 1.1:** Scaffolding, configuration, logging, health route, and Docker environment
-- ✅ **M1 · Task 1.2:** Database architecture, SQLAlchemy 2.x async session lifecycle, multi-tenant relational schema (`Developer`, `APIKey`, `UsageRecord`), Alembic async migrations, and tenant isolation tests (22/22 tests passing)
+- ✅ **M1 · Task 1.2:** Database architecture, SQLAlchemy 2.x async session lifecycle, multi-tenant relational schema (`Developer`, `APIKey`, `UsageRecord`), Alembic async migrations
+- ✅ **M1 · Task 1.3:** API Security, cryptographic API key issuance & SHA-256 constant-time hashing, scope-based authorization, sliding window rate limiting, monthly database quota tracking, tenant isolation, and developer endpoints (39/39 tests passing)
 
 ---
 
@@ -21,10 +23,11 @@
 
 - **Language:** Python 3.12
 - **Framework:** FastAPI
-- **Configuration & Validation:** Pydantic v2, Pydantic Settings
+- **Configuration & Validation:** Pydantic v2, Pydantic Settings, email-validator
 - **Database:** PostgreSQL 16 (orchestrated via Docker Compose)
 - **Database Driver / ORM:** SQLAlchemy 2.x (async), Asyncpg
-- **Testing:** Pytest, pytest-asyncio, HTTPX
+- **Migrations:** Alembic (async)
+- **Testing:** Pytest, pytest-asyncio, HTTPX, aiosqlite
 - **Server:** Uvicorn (ASGI)
 
 ---
@@ -42,47 +45,84 @@
 ├── requirements.txt          # Python dependencies
 ├── README.md                 # Project documentation
 ├── migrations/               # Alembic migration revisions
-│   ├── env.py                # Async migration runner
+│   ├── env.py                # Async migration runner (zero hardcoded secrets)
 │   ├── script.py.mako
 │   └── versions/             # Migration scripts
 ├── src/
 │   ├── __init__.py           # Application package root
-│   ├── main.py               # FastAPI application entry point & lifespan
+│   ├── main.py               # FastAPI entry point, lifespan & security headers
 │   ├── api/
 │   │   ├── __init__.py
-│   │   ├── deps.py           # Dependency injection (get_db)
+│   │   ├── deps.py           # Dependencies (get_db, auth, scopes, quota, rate-limit)
 │   │   └── routes/
 │   │       ├── __init__.py
-│   │       └── health.py     # Health check endpoint (/api/v1/health)
+│   │       ├── developers.py # Developer registration & profile endpoints
+│   │       ├── health.py     # Health check endpoint (/api/v1/health)
+│   │       ├── keys.py       # API key issuance, listing, and revocation
+│   │       ├── protected.py  # Scope & quota protected verification routes
+│   │       └── usage.py      # Monthly quota summary endpoints
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── config.py         # Pydantic Settings & environment variables
+│   │   ├── exceptions.py     # Domain exceptions (Auth, Quota, RateLimit, Conflict)
 │   │   ├── logging.py        # Structured JSON & console logging
-│   │   └── security.py       # API key hashing (SHA-256) & constant-time verification
+│   │   ├── rate_limiter.py   # Thread-safe in-memory sliding window rate limiter
+│   │   └── security.py       # SHA-256 API key hashing & constant-time comparison
 │   ├── db/
 │   │   ├── __init__.py
 │   │   ├── base.py           # Declarative base & metadata registry
 │   │   └── session.py        # Async engine & sessionmaker
-│   └── models/
-│       ├── __init__.py       # Model exports
-│       ├── api_key.py        # APIKey model & hash indexing
-│       ├── developer.py      # Developer tenant root model
-│       └── usage_record.py   # UsageRecord metering & audit model
+│   ├── models/
+│   │   ├── __init__.py       # Model exports
+│   │   ├── api_key.py        # APIKey model & hash indexing
+│   │   ├── developer.py      # Developer tenant root model
+│   │   └── usage_record.py   # UsageRecord metering & audit model
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   ├── api_key.py        # API key request/response schemas
+│   │   ├── developer.py      # Developer registration/profile schemas
+│   │   └── usage.py          # Usage summary schemas
+│   └── services/
+│       ├── __init__.py
+│       ├── api_key_service.py   # Key issuance, hashing, and auth
+│       ├── developer_service.py # Tenant management & quota assignment
+│       └── usage_service.py     # Metering & calendar month quota checks
 └── tests/
     ├── __init__.py
     ├── conftest.py           # Pytest fixtures (async client & in-memory test DB)
     ├── integration/
     │   ├── __init__.py
+    │   ├── test_auth_api.py   # End-to-end API registration, auth, and scopes
     │   └── test_migrations.py # Alembic upgrade/downgrade integration tests
     └── unit/
         ├── __init__.py
-        ├── test_config.py    # Configuration tests
-        ├── test_health.py    # Health check endpoint tests
-        ├── test_logging.py   # Structured logging tests
-        ├── test_models.py    # Model relationships, constraints, cascades
-        ├── test_security.py  # Cryptographic API key tests
+        ├── test_config.py     # Configuration tests
+        ├── test_health.py     # Health check endpoint tests
+        ├── test_logging.py    # Structured logging tests
+        ├── test_models.py     # Model relationships, constraints, cascades
+        ├── test_rate_limiter.py # Sliding window rate limiter tests
+        ├── test_security.py   # Cryptographic API key tests
+        ├── test_services.py   # Business services unit tests
         └── test_tenant_isolation.py # Multi-tenant isolation tests
 ```
+
+---
+
+## API Endpoints (Milestone 1)
+
+| Method | Endpoint | Auth Required | Description |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/` | No | API root & discovery metadata |
+| `GET` | `/api/v1/health` | No | Service health check |
+| `POST` | `/api/v1/developers` | No | Register new developer account |
+| `GET` | `/api/v1/developers/me` | `X-API-Key` | View authenticated developer profile & quota |
+| `POST` | `/api/v1/developers/{id}/keys` | No | Bootstrap initial API key for developer |
+| `POST` | `/api/v1/keys` | `X-API-Key` | Create a new API key (plain key returned once) |
+| `GET` | `/api/v1/keys` | `X-API-Key` | List all API keys for tenant |
+| `DELETE` | `/api/v1/keys/{key_id}` | `X-API-Key` | Revoke an API key |
+| `GET` | `/api/v1/usage/summary` | `X-API-Key` | Monthly quota consumption & remaining requests |
+| `GET` | `/api/v1/protected/sentiment` | `X-API-Key` | Protected route requiring `sentiment:read` |
+| `GET` | `/api/v1/protected/admin-only` | `X-API-Key` | Protected route requiring `admin` |
 
 ---
 
@@ -91,7 +131,7 @@
 ### Prerequisites
 
 - **Python 3.12+**
-- **Docker Desktop** (optional for local database container)
+- **Docker Desktop** (optional for local PostgreSQL 16 container)
 
 ### 1. Setup Virtual Environment
 
@@ -117,7 +157,7 @@ Copy the example environment configuration:
 cp .env.example .env
 ```
 
-### 3. Start Database (Optional for Task 1.1)
+### 3. Start Database (Optional)
 
 ```bash
 docker compose up -d
@@ -129,11 +169,9 @@ docker compose up -d
 uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Once running, access:
-- **Interactive API Documentation (Swagger):** [http://localhost:8000/docs](http://localhost:8000/docs)
-- **Alternative Documentation (ReDoc):** [http://localhost:8000/redoc](http://localhost:8000/redoc)
-- **API Root:** [http://localhost:8000/](http://localhost:8000/)
-- **Health Check:** [http://localhost:8000/api/v1/health](http://localhost:8000/api/v1/health)
+Interactive documentation:
+- **Swagger UI:** [http://localhost:8000/docs](http://localhost:8000/docs)
+- **ReDoc:** [http://localhost:8000/redoc](http://localhost:8000/redoc)
 
 ---
 
@@ -147,6 +185,15 @@ pytest -v
 
 Expected output:
 ```text
+tests/integration/test_auth_api.py::test_developer_registration PASSED
+tests/integration/test_auth_api.py::test_developer_registration_duplicate_email PASSED
+tests/integration/test_auth_api.py::test_api_key_issuance_and_auth_flow PASSED
+tests/integration/test_auth_api.py::test_authentication_failures PASSED
+tests/integration/test_auth_api.py::test_scope_enforcement PASSED
+tests/integration/test_auth_api.py::test_usage_summary_endpoint PASSED
+tests/integration/test_auth_api.py::test_tenant_cannot_revoke_other_tenant_key PASSED
+tests/integration/test_auth_api.py::test_rate_limiting_http PASSED
+tests/integration/test_auth_api.py::test_quota_exhaustion_http PASSED
 tests/integration/test_migrations.py::test_alembic_migration_upgrade_and_downgrade PASSED
 tests/unit/test_config.py::test_default_settings PASSED
 tests/unit/test_config.py::test_settings_environment_override PASSED
@@ -163,12 +210,21 @@ tests/unit/test_models.py::test_api_key_unique_hash PASSED
 tests/unit/test_models.py::test_api_key_revocation_and_expiration PASSED
 tests/unit/test_models.py::test_create_usage_record PASSED
 tests/unit/test_models.py::test_cascade_delete_developer PASSED
-tests/unit/test_models.py::test_delete_api_key_preserves_usage_record PASSED
+tests/unit/test_delete_api_key_preserves_usage_record PASSED
 tests/unit/test_models.py::test_database_check_constraints PASSED
+tests/unit/test_rate_limiter.py::test_rate_limiter_allows_under_limit PASSED
+tests/unit/test_rate_limiter.py::test_rate_limiter_blocks_over_limit PASSED
+tests/unit/test_rate_limiter.py::test_rate_limiter_resets_after_window PASSED
+tests/unit/test_rate_limiter.py::test_rate_limiter_independent_keys PASSED
 tests/unit/test_security.py::test_generate_api_key PASSED
 tests/unit/test_security.py::test_verify_api_key PASSED
+tests/unit/test_services.py::test_developer_service_crud PASSED
+tests/unit/test_services.py::test_api_key_service_lifecycle PASSED
+tests/unit/test_services.py::test_api_key_expired_rejection PASSED
+tests/unit/test_services.py::test_usage_service_quota_enforcement PASSED
 tests/unit/test_tenant_isolation.py::test_tenant_isolation_api_keys PASSED
 tests/unit/test_tenant_isolation.py::test_tenant_isolation_usage_records PASSED
+============================= 39 passed in 3.72s =============================
 ```
 
 ---
@@ -177,7 +233,7 @@ tests/unit/test_tenant_isolation.py::test_tenant_isolation_usage_records PASSED
 
 - [x] **M1 · Task 1.1:** Project Scaffolding & Development Environment
 - [x] **M1 · Task 1.2:** Database Architecture, Migrations & Tenancy
-- [ ] **M1 · Task 1.3:** API Security, Authentication & Rate Limiting
+- [x] **M1 · Task 1.3:** API Security, Authentication & Rate Limiting
 - [ ] **M2 · Task 2.1:** Sentiment Analysis Engine
 - [ ] **M2 · Task 2.2:** Named Entity Recognition (NER) Pipeline
 - [ ] **M2 · Task 2.3:** Zero-Shot Classification & Keyword Extraction
