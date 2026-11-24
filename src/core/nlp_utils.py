@@ -102,72 +102,111 @@ def extract_candidate_ngrams(
     return candidates
 
 
+def count_tokens_or_estimate(text: str, tokenizer: Optional[Any] = None) -> int:
+    """Accurately count tokens using a provided tokenizer, or conservatively estimate count.
+
+    Conservative estimation uses 1 token ~= 3.5 characters or word count * 1.33.
+    """
+    if tokenizer is not None and hasattr(tokenizer, "encode"):
+        try:
+            return len(tokenizer.encode(text, add_special_tokens=False))
+        except Exception:
+            pass
+    # Conservative fallback: max of word-based heuristic and character-based heuristic
+    words = text.split()
+    word_est = int(len(words) * 1.35)
+    char_est = int(len(text) / 3.5)
+    return max(word_est, char_est, 1)
+
+
 def chunk_text_by_sentences(
     text: str,
-    chunk_size: int = 2500,
+    chunk_size: int = 1800,
     min_chunk_size: int = 200,
+    tokenizer: Optional[Any] = None,
+    max_tokens: int = 600,
 ) -> List[str]:
     """Split text into natural sentence-bounded chunks for long-document summarization.
+
+    Enforces both character boundaries and tokenizer/token limits (default 600 tokens)
+    to strictly guarantee that model input limits (1024 tokens for distilbart-cnn-12-6)
+    are respected without silent truncation.
 
     Args:
         text: Input document text.
         chunk_size: Maximum character length target per chunk.
         min_chunk_size: Minimum characters to avoid trailing tiny fragments.
+        tokenizer: Optional Hugging Face tokenizer to compute exact token lengths.
+        max_tokens: Maximum token limit per chunk (leaves buffer below 1024 for special tokens).
 
     Returns:
         List of text chunks preserving document ordering without truncated words.
     """
-    if len(text) <= chunk_size:
-        return [text]
+    if not text or not text.strip():
+        return []
 
-    sentences = _SENTENCE_SPLIT_PATTERN.split(text.strip())
+    clean_text = text.strip()
+    initial_tokens = count_tokens_or_estimate(clean_text, tokenizer)
+    if len(clean_text) <= chunk_size and initial_tokens <= max_tokens:
+        return [clean_text]
+
+    sentences = _SENTENCE_SPLIT_PATTERN.split(clean_text)
     if not sentences:
-        return [text]
+        return [clean_text]
 
     chunks: List[str] = []
     current_chunk: List[str] = []
     current_length = 0
+    current_tokens = 0
 
     for sent in sentences:
         sent = sent.strip()
         if not sent:
             continue
         sent_len = len(sent)
+        sent_tokens = count_tokens_or_estimate(sent, tokenizer)
 
-        # If single sentence exceeds chunk_size, split by word
-        if sent_len > chunk_size:
+        # If a single sentence exceeds chunk_size or max_tokens, split by word
+        if sent_len > chunk_size or sent_tokens > max_tokens:
             if current_chunk:
                 chunks.append(" ".join(current_chunk))
                 current_chunk = []
                 current_length = 0
+                current_tokens = 0
 
             words = sent.split()
             word_chunk: List[str] = []
             word_len = 0
+            word_toks = 0
             for w in words:
-                if word_len + len(w) + 1 > chunk_size and word_chunk:
+                w_tok = count_tokens_or_estimate(w, tokenizer)
+                if (word_len + len(w) + 1 > chunk_size or word_toks + w_tok > max_tokens) and word_chunk:
                     chunks.append(" ".join(word_chunk))
                     word_chunk = [w]
                     word_len = len(w)
+                    word_toks = w_tok
                 else:
                     word_chunk.append(w)
                     word_len += len(w) + 1
+                    word_toks += w_tok
             if word_chunk:
                 chunks.append(" ".join(word_chunk))
             continue
 
-        if current_length + sent_len + 1 > chunk_size and current_chunk:
+        if (current_length + sent_len + 1 > chunk_size or current_tokens + sent_tokens > max_tokens) and current_chunk:
             chunks.append(" ".join(current_chunk))
             current_chunk = [sent]
             current_length = sent_len
+            current_tokens = sent_tokens
         else:
             current_chunk.append(sent)
             current_length += sent_len + 1
+            current_tokens += sent_tokens
 
     if current_chunk:
-        # Merge with previous chunk if trailing chunk is too small
         last_text = " ".join(current_chunk)
-        if chunks and len(last_text) < min_chunk_size and (len(chunks[-1]) + len(last_text) + 1 <= chunk_size * 1.2):
+        last_tokens = count_tokens_or_estimate(last_text, tokenizer)
+        if chunks and len(last_text) < min_chunk_size and (len(chunks[-1]) + len(last_text) + 1 <= chunk_size * 1.1) and (count_tokens_or_estimate(chunks[-1] + " " + last_text, tokenizer) <= max_tokens):
             chunks[-1] = chunks[-1] + " " + last_text
         else:
             chunks.append(last_text)

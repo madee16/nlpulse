@@ -15,7 +15,9 @@ def test_alembic_migration_upgrade_and_downgrade():
         db_url = f"sqlite+aiosqlite:///{tmp_db_path}"
         os.environ["DATABASE_URL"] = db_url
 
-        alembic_cfg = Config("alembic.ini")
+        ini_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "alembic.ini"))
+        alembic_cfg = Config(ini_path)
+        alembic_cfg.set_main_option("script_location", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "migrations")))
 
         # 1. Upgrade to head
         command.upgrade(alembic_cfg, "head")

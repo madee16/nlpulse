@@ -92,3 +92,21 @@ def test_chunk_text_by_sentences_huge_single_sentence():
     assert len(chunks) > 1
     for c in chunks:
         assert len(c) <= 250
+
+
+def test_chunk_text_by_sentences_token_bounded():
+    """Verify chunking strictly respects max_tokens when a tokenizer is simulated."""
+    class DummyTokenizer:
+        def encode(self, text, add_special_tokens=False):
+            # 1 token per 2 words
+            return [1] * max(1, len(text.split()) * 2)
+
+    tok = DummyTokenizer()
+    sentences = [f"This is a detailed sentence number {i} discussing machine learning." for i in range(30)]
+    long_doc = " ".join(sentences)
+
+    chunks = chunk_text_by_sentences(long_doc, chunk_size=2000, tokenizer=tok, max_tokens=50)
+    assert len(chunks) > 1
+    for c in chunks:
+        tok_count = len(tok.encode(c))
+        assert tok_count <= 60  # Allows slight margin for trailing word merges

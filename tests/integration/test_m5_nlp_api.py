@@ -269,3 +269,57 @@ async def test_m5_api_quota_exhaustion_blocks(async_client: AsyncClient, registe
     )
     assert sum_res.status_code == 429
     assert "quota" in sum_res.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_summarization_api_generation_parameters_validation(async_client: AsyncClient, registered_dev_headers: tuple):
+    """Verify rejection of invalid generation parameter combinations (temperature without do_sample)."""
+    headers, _ = registered_dev_headers
+
+    # temperature provided while do_sample is False
+    res = await async_client.post(
+        "/api/v1/nlp/summarization",
+        headers=headers,
+        json={"text": "Valid document to summarize.", "do_sample": False, "temperature": 0.7},
+    )
+    assert res.status_code == 422
+
+    # valid sampling parameters
+    valid_res = await async_client.post(
+        "/api/v1/nlp/summarization",
+        headers=headers,
+        json={"text": "Valid document to summarize with sampling.", "do_sample": True, "temperature": 0.8},
+    )
+    assert valid_res.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_existing_analyze_read_key_compatibility(async_client: AsyncClient, registered_dev_headers: tuple):
+    """Verify backwards compatibility: existing API keys with analyze:read access keywords & summarization."""
+    headers, _ = registered_dev_headers
+
+    # Create child key holding ONLY analyze:read (the canonical M1-M4 scope)
+    key_res = await async_client.post(
+        "/api/v1/keys",
+        headers=headers,
+        json={"name": "Legacy M1-M4 Key", "scopes": ["analyze:read"]},
+    )
+    assert key_res.status_code == 201
+    legacy_key = key_res.json()["api_key"]
+    legacy_headers = {"X-API-Key": legacy_key}
+
+    # Access keywords
+    kw_res = await async_client.post(
+        "/api/v1/nlp/keywords",
+        headers=legacy_headers,
+        json={"text": "FastAPI and PostgreSQL.", "max_keywords": 2},
+    )
+    assert kw_res.status_code == 200
+
+    # Access summarization
+    sum_res = await async_client.post(
+        "/api/v1/nlp/summarization",
+        headers=legacy_headers,
+        json={"text": "A valid document to summarize."},
+    )
+    assert sum_res.status_code == 200

@@ -1,7 +1,7 @@
 """Pydantic schemas for NLP inference requests and structured response payloads."""
 
 from typing import Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # -----------------------------------------------------------------------------
@@ -193,6 +193,16 @@ class SummarizationRequest(BaseModel):
         le=2.0,
         description="Sampling temperature if do_sample is True",
     )
+
+    @model_validator(mode="after")
+    def validate_generation_params(self) -> "SummarizationRequest":
+        if self.min_length > self.max_length:
+            raise ValueError(f"min_length ({self.min_length}) cannot exceed max_length ({self.max_length}).")
+        if not self.do_sample and self.temperature is not None:
+            raise ValueError("temperature is only effective when do_sample=True. Set do_sample=True or omit temperature.")
+        if self.do_sample and self.temperature is not None and self.temperature <= 0.0:
+            raise ValueError("temperature must be strictly greater than 0.0 when do_sample=True.")
+        return self
 
 
 class SummarizationResponse(BaseModel):

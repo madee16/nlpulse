@@ -368,11 +368,16 @@ class EmbeddingModel(BaseModel):
 
         import torch
 
+        # Tokenize with explicit length bounding respecting Sentence Transformers all-MiniLM-L6-v2 limit
+        max_seq_len = 256
+        if hasattr(self._tokenizer, "model_max_length") and isinstance(self._tokenizer.model_max_length, int):
+            max_seq_len = min(self._tokenizer.model_max_length, 256)
+
         encoded = self._tokenizer(
             texts,
             padding=True,
             truncation=True,
-            max_length=512,
+            max_length=max_seq_len,
             return_tensors="pt",
         )
         if self._device_str == "cuda" and torch.cuda.is_available():
@@ -456,6 +461,9 @@ class SummarizationModel(BaseModel):
 
         if min_length > max_length:
             raise ValueError(f"min_length ({min_length}) cannot exceed max_length ({max_length})")
+
+        if not do_sample and "temperature" in inputs and inputs["temperature"] is not None:
+            raise ValueError("temperature is only effective when do_sample=True")
 
         pipe_kwargs: Dict[str, Any] = {
             "max_length": max_length,

@@ -227,6 +227,41 @@ async def test_summarize_validation_errors(mock_session, m5_test_registry):
     with pytest.raises(NLPValidationError):
         await service.summarize_text(text="Valid text", developer_id=dev_id, min_length=100, max_length=50)
 
-    # Invalid temperature
-    with pytest.raises(NLPValidationError):
-        await service.summarize_text(text="Valid text", developer_id=dev_id, temperature=3.5)
+    # Invalid temperature range when do_sample=True
+    with pytest.raises(NLPValidationError, match="temperature must be between 0.0"):
+        await service.summarize_text(text="Valid text", developer_id=dev_id, do_sample=True, temperature=3.5)
+
+    with pytest.raises(NLPValidationError, match="temperature must be between 0.0"):
+        await service.summarize_text(text="Valid text", developer_id=dev_id, do_sample=True, temperature=0.0)
+
+    # temperature specified without do_sample=True
+    with pytest.raises(NLPValidationError, match="temperature can only be specified when do_sample=True"):
+        await service.summarize_text(text="Valid text", developer_id=dev_id, do_sample=False, temperature=0.7)
+
+
+@pytest.mark.asyncio
+async def test_keyword_extraction_deterministic_tie_breaking(mock_session, m5_test_registry):
+    """Verify identical similarity scores are deterministically tie-broken alphabetically."""
+    reg = ModelRegistry()
+    emb_meta = ModelMetadata(
+        model_id=settings.MODEL_EMBEDDING_ID,
+        name="Test Embedding",
+        task="embedding",
+    )
+    # Return identical vectors for all texts to produce identical similarity scores
+    def uniform_emb(texts: list):
+        return np.ones((len(texts), 3), dtype=np.float32) / np.sqrt(3.0)
+
+    reg.register(emb_meta, lambda: EmbeddingModel(emb_meta, pipeline_factory=lambda: uniform_emb))
+    service = NLPService(session=mock_session, registry=reg)
+    dev_id = uuid.uuid4()
+
+    result = await service.extract_keywords(
+        text="zebra alpha beta dolphin",
+        developer_id=dev_id,
+        candidates=["zebra", "alpha", "beta", "dolphin"],
+        max_keywords=4,
+    )
+    kw_names = [k["keyword"] for k in result["keywords"]]
+    # Should be sorted alphabetically because all scores are identical
+    assert kw_names == sorted(kw_names)

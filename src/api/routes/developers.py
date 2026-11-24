@@ -51,6 +51,8 @@ async def register_developer(
             "classification:read",
             "keywords:read",
             "summarization:read",
+            "extraction:read",
+            "generate:read",
             "keys:read",
             "keys:write",
             "usage:read",

@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     MODEL_EMBEDDING_ID: str = "sentence-transformers/all-MiniLM-L6-v2"
     MODEL_SUMMARIZATION_ID: str = "sshleifer/distilbart-cnn-12-6"
     KEYWORD_MAX_CANDIDATES: int = 100
-    SUMMARIZATION_CHUNK_SIZE: int = 2500
+    SUMMARIZATION_CHUNK_SIZE: int = 1800
 
     # CORS
     CORS_ORIGINS: Union[List[str], str] = ["*"]

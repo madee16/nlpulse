@@ -256,13 +256,14 @@ class NLPService:
         doc_norm = np.linalg.norm(doc_emb)
         cand_norms = np.linalg.norm(cand_embs, axis=1)
         sim_scores = dot_products / (np.maximum(doc_norm * cand_norms, 1e-9))
+        sim_scores = np.clip(sim_scores, -1.0, 1.0)
 
         ranked: List[Dict[str, Any]] = [
             {"keyword": phrase, "score": round(float(score), 4)}
             for phrase, score in zip(candidate_phrases, sim_scores)
         ]
-        # Sort descending by relevance score
-        ranked.sort(key=lambda x: x["score"], reverse=True)
+        # Deterministic sorting: descending by score, ascending by keyword for ties
+        ranked.sort(key=lambda x: (-x["score"], x["keyword"]))
         top_keywords = ranked[:max_keywords]
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
 
@@ -304,8 +305,11 @@ class NLPService:
                 "Must satisfy 5 <= min_length <= max_length <= 1000."
             )
 
-        if temperature is not None and (temperature < 0.0 or temperature > 2.0):
-            raise NLPValidationError("temperature must be between 0.0 and 2.0.")
+        if not do_sample and temperature is not None:
+            raise NLPValidationError("temperature can only be specified when do_sample=True.")
+
+        if do_sample and temperature is not None and (temperature <= 0.0 or temperature > 2.0):
+            raise NLPValidationError("temperature must be between 0.0 (exclusive) and 2.0 when do_sample=True.")
 
         model_id = settings.MODEL_SUMMARIZATION_ID
         model = await self.registry.get_model(model_id)
@@ -325,7 +329,7 @@ class NLPService:
             })
             final_summary = res["summary_text"]
         else:
-            # Multi-chunk processing and consolidation pass
+            # Multi-chunk processing and hierarchical consolidation pass
             chunk_summaries = []
             chunk_max_len = max(min_length, min(max_length, 80))
             chunk_min_len = min(min_length, 20)
@@ -341,7 +345,25 @@ class NLPService:
                 chunk_summaries.append(chunk_res["summary_text"])
 
             consolidated_input = " ".join(chunk_summaries)
-            # Final consolidation pass
+            # Guard against consolidated text exceeding chunk limit
+            if len(consolidated_input) > settings.SUMMARIZATION_CHUNK_SIZE:
+                sub_chunks = chunk_text_by_sentences(
+                    consolidated_input,
+                    chunk_size=settings.SUMMARIZATION_CHUNK_SIZE,
+                )
+                sub_summaries = []
+                for sc in sub_chunks:
+                    sc_res = await model.predict({
+                        "text": sc,
+                        "min_length": chunk_min_len,
+                        "max_length": chunk_max_len,
+                        "do_sample": do_sample,
+                        "temperature": temperature,
+                    })
+                    sub_summaries.append(sc_res["summary_text"])
+                consolidated_input = " ".join(sub_summaries)
+
+            # Final consolidation pass guaranteed to fit model input token limit
             final_res = await model.predict({
                 "text": consolidated_input,
                 "min_length": min_length,
