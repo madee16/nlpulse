@@ -13,7 +13,7 @@
 ## Current Status: M1 & M2 Complete ✅
 
 - ✅ **M1: Foundations & Database** — Project structure, PostgreSQL 16, async SQLAlchemy 2.x session lifecycle, models (`Developer`, `APIKey`, `UsageRecord`), and Alembic async migrations.
-- ✅ **M2: Security & Authentication** — API keys, SHA-256 constant-time hashing, scope enforcement, sliding window rate limiting, monthly database quotas, and tenant isolation (39/39 tests passing).
+- ✅ **M2: Security & Authentication** — API keys, SHA-256 constant-time hashing, scope enforcement, sliding window rate limiting, monthly database quotas, and tenant isolation (44/44 tests passing).
 - ⏳ **M3: Model Lifecycle Management** — Ready for kickoff (Model loading, caching, GPU/CPU management, concurrency).
 
 ---
@@ -107,16 +107,15 @@
 
 ---
 
-## API Endpoints (Milestone 1)
+## API Endpoints (Milestones 1 & 2)
 
 | Method | Endpoint | Auth Required | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/` | No | API root & discovery metadata |
 | `GET` | `/api/v1/health` | No | Service health check |
-| `POST` | `/api/v1/developers` | No | Register new developer account |
+| `POST` | `/api/v1/developers` | No | Register developer (enforces free tier & returns bootstrap API key) |
 | `GET` | `/api/v1/developers/me` | `X-API-Key` | View authenticated developer profile & quota |
-| `POST` | `/api/v1/developers/{id}/keys` | No | Bootstrap initial API key for developer |
-| `POST` | `/api/v1/keys` | `X-API-Key` | Create a new API key (plain key returned once) |
+| `POST` | `/api/v1/keys` | `X-API-Key` | Create a child API key (scopes must be subset of caller's key) |
 | `GET` | `/api/v1/keys` | `X-API-Key` | List all API keys for tenant |
 | `DELETE` | `/api/v1/keys/{key_id}` | `X-API-Key` | Revoke an API key |
 | `GET` | `/api/v1/usage/summary` | `X-API-Key` | Monthly quota consumption & remaining requests |

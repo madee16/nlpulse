@@ -6,7 +6,9 @@ import uuid
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import get_current_developer, get_db
+from src.api.deps import get_current_api_key, get_current_developer, get_db
+from src.core.exceptions import PermissionDeniedError
+from src.models.api_key import APIKey
 from src.models.developer import Developer
 from src.schemas.api_key import (
     APIKeyCreate,
@@ -23,19 +25,39 @@ router = APIRouter(prefix="/keys", tags=["API Keys"])
     response_model=APIKeyCreatedResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a new API key",
-    description="Generates a new API key for the authenticated developer. Raw key returned ONLY once.",
+    description=(
+        "Generates a new API key for the authenticated developer. Raw key returned ONLY once. "
+        "Keys can only be granted a subset of the scopes held by the authorizing API key."
+    ),
 )
 async def create_key(
     payload: APIKeyCreate,
+    current_key: APIKey = Depends(get_current_api_key),
     developer: Developer = Depends(get_current_developer),
     db: AsyncSession = Depends(get_db),
 ) -> APIKeyCreatedResponse:
-    """Create a new API key for the current authenticated developer."""
+    """Create a new API key for the current authenticated developer preventing privilege escalation."""
+    requested_scopes = set(payload.scopes)
+    authorizing_scopes = set(current_key.scopes or [])
+
+    # Privilege Escalation Guard:
+    # A standard key without 'admin' cannot grant 'admin' or any scope it does not possess
+    if "admin" not in authorizing_scopes and "*" not in authorizing_scopes:
+        if "admin" in requested_scopes or "*" in requested_scopes:
+            raise PermissionDeniedError("Cannot grant unassigned or privileged scope: 'admin'.")
+
+        unauthorized_scopes = requested_scopes - authorizing_scopes
+        if unauthorized_scopes:
+            raise PermissionDeniedError(
+                f"Cannot grant unassigned or privileged scope(s) {list(unauthorized_scopes)}. "
+                f"Authorizing key only holds: {list(authorizing_scopes)}"
+            )
+
     service = APIKeyService(db)
     api_key, raw_key = await service.create_key(
         developer_id=developer.id,
         name=payload.name,
-        scopes=payload.scopes,
+        scopes=list(requested_scopes),
         expires_in_days=payload.expires_in_days,
     )
 

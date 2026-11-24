@@ -14,7 +14,7 @@ from src.schemas.usage import UsageSummaryResponse
 
 
 class UsageService:
-    """Service managing API usage metering and monthly quota enforcement."""
+    """Service managing API usage metering and atomic monthly quota enforcement."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -81,14 +81,25 @@ class UsageService:
         )
 
     async def assert_within_quota(self, developer: Developer) -> None:
-        """Ensure developer has not exceeded their monthly request limit.
+        """Atomically ensure developer has not exceeded their monthly request limit.
+
+        Acquires an exclusive row lock on the Developer record (SELECT ... FOR UPDATE)
+        to serialize concurrent checks and eliminate TOCTOU race conditions.
 
         Raises:
             QuotaExceededError: If the quota has been reached or exceeded.
         """
-        used = await self.get_monthly_usage_count(developer.id)
-        if used >= developer.monthly_request_quota:
+        stmt = (
+            select(Developer)
+            .where(Developer.id == developer.id)
+            .with_for_update()
+        )
+        result = await self.session.execute(stmt)
+        locked_dev = result.scalar_one_or_none() or developer
+
+        used = await self.get_monthly_usage_count(locked_dev.id)
+        if used >= locked_dev.monthly_request_quota:
             raise QuotaExceededError(
-                f"Monthly request quota of {developer.monthly_request_quota} requests exhausted. "
+                f"Monthly request quota of {locked_dev.monthly_request_quota} requests exhausted. "
                 "Please upgrade your tier to continue sending requests."
             )
