@@ -10,12 +10,11 @@
 
 ---
 
-## Current Status: Milestone 1 Complete ✅
+## Current Status: M1 & M2 Complete ✅
 
-**Milestone 1 — Foundations, Database & API Security:**
-- ✅ **M1 · Task 1.1:** Scaffolding, configuration, logging, health route, and Docker environment
-- ✅ **M1 · Task 1.2:** Database architecture, SQLAlchemy 2.x async session lifecycle, multi-tenant relational schema (`Developer`, `APIKey`, `UsageRecord`), Alembic async migrations
-- ✅ **M1 · Task 1.3:** API Security, cryptographic API key issuance & SHA-256 constant-time hashing, scope-based authorization, sliding window rate limiting, monthly database quota tracking, tenant isolation, and developer endpoints (39/39 tests passing)
+- ✅ **M1: Foundations & Database** — Project structure, PostgreSQL 16, async SQLAlchemy 2.x session lifecycle, models (`Developer`, `APIKey`, `UsageRecord`), and Alembic async migrations.
+- ✅ **M2: Security & Authentication** — API keys, SHA-256 constant-time hashing, scope enforcement, sliding window rate limiting, monthly database quotas, and tenant isolation (39/39 tests passing).
+- ⏳ **M3: Model Lifecycle Management** — Ready for kickoff (Model loading, caching, GPU/CPU management, concurrency).
 
 ---
 
@@ -229,14 +228,16 @@ tests/unit/test_tenant_isolation.py::test_tenant_isolation_usage_records PASSED
 
 ---
 
-## Roadmap
+## Roadmap (M1–M9)
 
-- [x] **M1 · Task 1.1:** Project Scaffolding & Development Environment
-- [x] **M1 · Task 1.2:** Database Architecture, Migrations & Tenancy
-- [x] **M1 · Task 1.3:** API Security, Authentication & Rate Limiting
-- [ ] **M2 · Task 2.1:** Sentiment Analysis Engine
-- [ ] **M2 · Task 2.2:** Named Entity Recognition (NER) Pipeline
-- [ ] **M2 · Task 2.3:** Zero-Shot Classification & Keyword Extraction
-- [ ] **M3 · Task 3.1:** Text Summarization Service
-- [ ] **M3 · Task 3.2:** LLM Structured Extraction (Ollama Integration)
-- [ ] **M3 · Task 3.3:** Batch Processing & Async Worker Integration
+| Milestone | Focus | Main Deliverable | Status |
+| :--- | :--- | :--- | :--- |
+| **M1** | Foundations & Database | Project structure, PostgreSQL, SQLAlchemy, models, migrations | ✅ Complete |
+| **M2** | Security & Authentication | API keys, authentication, scopes, rate limiting, quotas | ✅ Complete |
+| **M3** | Model Lifecycle Management | Model loading, caching, GPU/CPU management, concurrency | ⏳ Next |
+| **M4** | Core NLP | Sentiment analysis, NER, zero-shot classification | 📋 Planned |
+| **M5** | Advanced NLP | Keyword extraction, summarization | 📋 Planned |
+| **M6** | Generative NLP | Ollama integration, structured information extraction | 📋 Planned |
+| **M7** | Batch Processing | Efficient multi-text inference and benchmarking | 📋 Planned |
+| **M8** | Integration & Verification | API integration, end-to-end tests, security verification | 📋 Planned |
+| **M9** | Documentation & Portfolio | README, architecture docs, ADRs, interview preparation, final release | 📋 Planned |
