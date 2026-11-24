@@ -11,10 +11,12 @@ from __future__ import annotations
 import gc
 from typing import Any, Callable, Dict, List, Optional
 
+from src.core.config import get_settings
 from src.core.logging import get_logger
 from src.core.models.base import BaseModel, ModelMetadata
 
 logger = get_logger("nlpulse.core.models.nlp")
+settings = get_settings()
 
 
 class SentimentModel(BaseModel):
@@ -22,9 +24,19 @@ class SentimentModel(BaseModel):
 
     def __init__(
         self,
-        metadata: ModelMetadata,
+        metadata: Optional[ModelMetadata] = None,
         pipeline_factory: Optional[Callable[[], Any]] = None,
     ) -> None:
+        if metadata is None:
+            metadata = ModelMetadata(
+                model_id=settings.MODEL_SENTIMENT_ID,
+                name="DistilBERT Sentiment Analysis",
+                task="sentiment",
+                vram_estimate_mb=270.0,
+                ram_estimate_mb=350.0,
+                max_concurrency=settings.MODEL_DEFAULT_CONCURRENCY,
+                timeout_seconds=settings.MODEL_INFERENCE_TIMEOUT_SECONDS,
+            )
         super().__init__(metadata)
         self.pipeline_factory = pipeline_factory
         self._pipeline = None
@@ -93,9 +105,19 @@ class NERModel(BaseModel):
 
     def __init__(
         self,
-        metadata: ModelMetadata,
+        metadata: Optional[ModelMetadata] = None,
         pipeline_factory: Optional[Callable[[], Any]] = None,
     ) -> None:
+        if metadata is None:
+            metadata = ModelMetadata(
+                model_id=settings.MODEL_NER_ID,
+                name="BERT Named Entity Recognition",
+                task="ner",
+                vram_estimate_mb=420.0,
+                ram_estimate_mb=500.0,
+                max_concurrency=settings.MODEL_DEFAULT_CONCURRENCY,
+                timeout_seconds=settings.MODEL_INFERENCE_TIMEOUT_SECONDS,
+            )
         super().__init__(metadata)
         self.pipeline_factory = pipeline_factory
         self._pipeline = None
@@ -142,13 +164,26 @@ class NERModel(BaseModel):
 
         for item in raw_entities:
             entity_type = item.get("entity_group", item.get("entity", "UNKNOWN"))
+            start = int(item.get("start", 0))
+            end = int(item.get("end", 0))
+
+            # Guard against inverted or negative offsets
+            if start < 0:
+                start = 0
+            if end < start:
+                start, end = end, start
+
+            word = item.get("word", "").strip()
+            if not word and 0 <= start <= end <= len(inputs):
+                word = inputs[start:end].strip()
+
             formatted_entities.append(
                 {
                     "entity": entity_type,
-                    "text": item.get("word", "").strip(),
+                    "text": word,
                     "confidence": round(float(item.get("score", 0.0)), 4),
-                    "start_offset": int(item.get("start", 0)),
-                    "end_offset": int(item.get("end", 0)),
+                    "start_offset": start,
+                    "end_offset": end,
                 }
             )
 
@@ -163,9 +198,19 @@ class ZeroShotClassificationModel(BaseModel):
 
     def __init__(
         self,
-        metadata: ModelMetadata,
+        metadata: Optional[ModelMetadata] = None,
         pipeline_factory: Optional[Callable[[], Any]] = None,
     ) -> None:
+        if metadata is None:
+            metadata = ModelMetadata(
+                model_id=settings.MODEL_ZERO_SHOT_ID,
+                name="DistilBART Zero-Shot Classification",
+                task="zero-shot",
+                vram_estimate_mb=550.0,
+                ram_estimate_mb=700.0,
+                max_concurrency=settings.MODEL_DEFAULT_CONCURRENCY,
+                timeout_seconds=settings.MODEL_INFERENCE_TIMEOUT_SECONDS,
+            )
         super().__init__(metadata)
         self.pipeline_factory = pipeline_factory
         self._pipeline = None
@@ -221,6 +266,9 @@ class ZeroShotClassificationModel(BaseModel):
             multi_label=multi_label,
         )
 
+        if not isinstance(raw_output, dict):
+            raise ValueError(f"Unexpected pipeline return format: {type(raw_output).__name__}")
+
         labels = raw_output.get("labels", [])
         scores = raw_output.get("scores", [])
 
@@ -228,6 +276,9 @@ class ZeroShotClassificationModel(BaseModel):
             {"label": lbl, "score": round(float(sc), 4)}
             for lbl, sc in zip(labels, scores)
         ]
+
+        # Explicitly guarantee descending order by score
+        predictions.sort(key=lambda x: x["score"], reverse=True)
 
         top_pred = predictions[0] if predictions else None
 

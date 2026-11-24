@@ -159,7 +159,7 @@ async def test_ner_api_success(async_client: AsyncClient, registered_auth_header
     response = await async_client.post(
         "/api/v1/nlp/ner",
         headers=headers,
-        json={"text": "Sundar announced new models."},
+        json={"text": "Sundar Pichai announced new models."},
     )
     assert response.status_code == 200
     data = response.json()
@@ -167,6 +167,7 @@ async def test_ner_api_success(async_client: AsyncClient, registered_auth_header
     assert data["entities"][0]["entity"] == "PER"
     assert data["entities"][0]["text"] == "Sundar Pichai"
     assert data["entities"][0]["start_offset"] == 0
+    assert data["entities"][0]["end_offset"] == 13
 
 
 @pytest.mark.asyncio

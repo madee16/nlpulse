@@ -27,12 +27,12 @@ pytestmark = [
 @pytest.mark.asyncio
 async def test_live_sentiment_pipeline_smoke():
     model = SentimentModel()
-    await model.load()
+    await model.load("cpu")
     try:
         result = await model.predict("NLPulse provides incredible low-latency NLP APIs!")
-        assert result["sentiment"] == "POSITIVE"
+        assert result["label"] == "POSITIVE"
         assert result["confidence"] > 0.90
-        assert "latency_ms" in result
+        assert "scores" in result
     finally:
         await model.unload()
 
@@ -40,14 +40,19 @@ async def test_live_sentiment_pipeline_smoke():
 @pytest.mark.asyncio
 async def test_live_ner_pipeline_smoke():
     model = NERModel()
-    await model.load()
+    await model.load("cpu")
     try:
-        result = await model.predict("Sundar Pichai leads Google in Mountain View, California.")
+        text = "Sundar Pichai leads Google in Mountain View, California."
+        result = await model.predict(text)
         entities = result["entities"]
+        assert len(entities) > 0
         entity_texts = [e["text"] for e in entities]
-        assert any("Sundar Pichai" in text for text in entity_texts)
-        assert any("Google" in text for text in entity_texts)
-        assert any("Mountain View" in text or "California" in text for text in entity_texts)
+        assert any("Sundar Pichai" in t for t in entity_texts)
+        assert any("Google" in t for t in entity_texts)
+        assert any("Mountain View" in t or "California" in t for t in entity_texts)
+        for e in entities:
+            assert 0 <= e["start_offset"] <= e["end_offset"] <= len(text)
+            assert text[e["start_offset"]:e["end_offset"]] == e["text"]
     finally:
         await model.unload()
 
@@ -55,15 +60,15 @@ async def test_live_ner_pipeline_smoke():
 @pytest.mark.asyncio
 async def test_live_zero_shot_pipeline_smoke():
     model = ZeroShotClassificationModel()
-    await model.load()
+    await model.load("cpu")
     try:
-        result = await model.predict(
-            text="SpaceX launched another Falcon 9 rocket carrying Starlink satellites into orbit.",
-            candidate_labels=["aerospace", "sports", "cooking"],
-            multi_label=False,
-        )
-        assert result["predicted_label"] == "aerospace"
-        assert result["scores"][0]["label"] == "aerospace"
-        assert result["scores"][0]["score"] > 0.80
+        result = await model.predict({
+            "text": "SpaceX launched another Falcon 9 rocket carrying Starlink satellites into orbit.",
+            "candidate_labels": ["aerospace", "sports", "cooking"],
+            "multi_label": False,
+        })
+        assert result["top_label"] == "aerospace"
+        assert result["predictions"][0]["label"] == "aerospace"
+        assert result["predictions"][0]["score"] > 0.80
     finally:
         await model.unload()
