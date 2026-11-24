@@ -54,7 +54,7 @@ htmlcov/
 .nox/
 
 # Hugging Face & Model caches / weights
-models/
+/models/
 model_cache/
 .cache/
 hf_models/

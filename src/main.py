@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api.routes.health import router as health_router
 from src.core.config import get_settings
 from src.core.logging import get_logger, setup_logging
+from src.db.session import engine
 
 settings = get_settings()
 logger = get_logger("nlpulse.main")
@@ -28,6 +29,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     yield
     logger.info("NLPulse service shutting down")
+    await engine.dispose()
 
 
 def create_application() -> FastAPI:

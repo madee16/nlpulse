@@ -10,16 +10,10 @@
 
 ---
 
-## Current Status: M1 · Task 1.1
+## Current Status: M1 · Task 1.2
 
-Foundational scaffolding and development environment initialized:
-- ✅ Python 3.12 environment & dependency management with `pyproject.toml` and `requirements.txt`
-- ✅ Centralized configuration with Pydantic Settings (`pydantic-settings`) and `.env.example`
-- ✅ Structured logging (JSON format for production, human-readable text for development)
-- ✅ FastAPI application entry point with lifespan management, CORS, and health check endpoints
-- ✅ Docker Compose orchestration for PostgreSQL 16
-- ✅ Production-ready `Dockerfile`
-- ✅ Unit test suite with Pytest and HTTPX ASGI test client
+- ✅ **M1 · Task 1.1:** Scaffolding, configuration, logging, health route, and Docker environment
+- ✅ **M1 · Task 1.2:** Database architecture, SQLAlchemy 2.x async session lifecycle, multi-tenant relational schema (`Developer`, `APIKey`, `UsageRecord`), Alembic async migrations, and tenant isolation tests (22/22 tests passing)
 
 ---
 
@@ -42,30 +36,52 @@ Foundational scaffolding and development environment initialized:
 ├── .env.example              # Environment variables template
 ├── .gitignore                # Git ignore for Python, venv, caches, weights
 ├── Dockerfile                # Container build specification
+├── alembic.ini               # Alembic configuration
 ├── docker-compose.yml        # PostgreSQL 16 local orchestration
 ├── pyproject.toml            # Project metadata and build configuration
 ├── requirements.txt          # Python dependencies
 ├── README.md                 # Project documentation
+├── migrations/               # Alembic migration revisions
+│   ├── env.py                # Async migration runner
+│   ├── script.py.mako
+│   └── versions/             # Migration scripts
 ├── src/
 │   ├── __init__.py           # Application package root
 │   ├── main.py               # FastAPI application entry point & lifespan
 │   ├── api/
 │   │   ├── __init__.py
+│   │   ├── deps.py           # Dependency injection (get_db)
 │   │   └── routes/
 │   │       ├── __init__.py
 │   │       └── health.py     # Health check endpoint (/api/v1/health)
-│   └── core/
-│       ├── __init__.py
-│       ├── config.py         # Pydantic Settings & environment variables
-│       └── logging.py        # Structured JSON & console logging
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── config.py         # Pydantic Settings & environment variables
+│   │   ├── logging.py        # Structured JSON & console logging
+│   │   └── security.py       # API key hashing (SHA-256) & constant-time verification
+│   ├── db/
+│   │   ├── __init__.py
+│   │   ├── base.py           # Declarative base & metadata registry
+│   │   └── session.py        # Async engine & sessionmaker
+│   └── models/
+│       ├── __init__.py       # Model exports
+│       ├── api_key.py        # APIKey model & hash indexing
+│       ├── developer.py      # Developer tenant root model
+│       └── usage_record.py   # UsageRecord metering & audit model
 └── tests/
     ├── __init__.py
-    ├── conftest.py           # Pytest fixtures (async HTTP client)
+    ├── conftest.py           # Pytest fixtures (async client & in-memory test DB)
+    ├── integration/
+    │   ├── __init__.py
+    │   └── test_migrations.py # Alembic upgrade/downgrade integration tests
     └── unit/
         ├── __init__.py
         ├── test_config.py    # Configuration tests
         ├── test_health.py    # Health check endpoint tests
-        └── test_logging.py   # Structured logging tests
+        ├── test_logging.py   # Structured logging tests
+        ├── test_models.py    # Model relationships, constraints, cascades
+        ├── test_security.py  # Cryptographic API key tests
+        └── test_tenant_isolation.py # Multi-tenant isolation tests
 ```
 
 ---
@@ -131,6 +147,7 @@ pytest -v
 
 Expected output:
 ```text
+tests/integration/test_migrations.py::test_alembic_migration_upgrade_and_downgrade PASSED
 tests/unit/test_config.py::test_default_settings PASSED
 tests/unit/test_config.py::test_settings_environment_override PASSED
 tests/unit/test_config.py::test_get_settings_caching PASSED
@@ -139,6 +156,19 @@ tests/unit/test_health.py::test_root_health_endpoint PASSED
 tests/unit/test_health.py::test_root_endpoint PASSED
 tests/unit/test_logging.py::test_json_formatter PASSED
 tests/unit/test_logging.py::test_setup_logging_text_and_json PASSED
+tests/unit/test_models.py::test_create_developer PASSED
+tests/unit/test_models.py::test_developer_unique_email PASSED
+tests/unit/test_models.py::test_create_api_key_and_relationship PASSED
+tests/unit/test_models.py::test_api_key_unique_hash PASSED
+tests/unit/test_models.py::test_api_key_revocation_and_expiration PASSED
+tests/unit/test_models.py::test_create_usage_record PASSED
+tests/unit/test_models.py::test_cascade_delete_developer PASSED
+tests/unit/test_models.py::test_delete_api_key_preserves_usage_record PASSED
+tests/unit/test_models.py::test_database_check_constraints PASSED
+tests/unit/test_security.py::test_generate_api_key PASSED
+tests/unit/test_security.py::test_verify_api_key PASSED
+tests/unit/test_tenant_isolation.py::test_tenant_isolation_api_keys PASSED
+tests/unit/test_tenant_isolation.py::test_tenant_isolation_usage_records PASSED
 ```
 
 ---
@@ -146,7 +176,7 @@ tests/unit/test_logging.py::test_setup_logging_text_and_json PASSED
 ## Roadmap
 
 - [x] **M1 · Task 1.1:** Project Scaffolding & Development Environment
-- [ ] **M1 · Task 1.2:** Database Architecture, Migrations & Tenancy
+- [x] **M1 · Task 1.2:** Database Architecture, Migrations & Tenancy
 - [ ] **M1 · Task 1.3:** API Security, Authentication & Rate Limiting
 - [ ] **M2 · Task 2.1:** Sentiment Analysis Engine
 - [ ] **M2 · Task 2.2:** Named Entity Recognition (NER) Pipeline
