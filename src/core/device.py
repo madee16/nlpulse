@@ -207,7 +207,11 @@ class DeviceManager:
         )
 
     def empty_cuda_cache(self) -> None:
-        """Release unoccupied cached memory held by CUDA caching allocator."""
+        """Release unoccupied cached memory held by CUDA caching allocator.
+
+        Note: This only returns unused cached blocks to the driver. It cannot
+        free live tensor memory allocated by active models.
+        """
         if self.is_cuda_available():
             try:
                 import torch
@@ -216,11 +220,55 @@ class DeviceManager:
             except Exception as e:
                 logger.debug(f"Failed to empty CUDA cache: {e}")
 
-    def handle_cuda_oom(self) -> None:
-        """Mitigate CUDA out-of-memory errors by running garbage collection and emptying cache."""
-        logger.warning("CUDA out-of-memory condition detected. Triggering emergency memory cleanup.")
+    def handle_cuda_oom(self) -> Dict[str, Any]:
+        """Diagnostic logging and cache release following a CUDA out-of-memory event.
+
+        Distinguishes live tensor memory from unused cached allocator memory.
+        Note: empty_cache() is a memory release mechanism for unused blocks;
+        it cannot recover an operation that genuinely exceeded physical VRAM.
+        Active models are not invalidated or corrupted.
+
+        Returns:
+            Dictionary containing VRAM diagnostics before and after cache release.
+        """
+        logger.warning(
+            "CUDA Out-of-Memory event encountered. Distinguishing live allocations from cached memory."
+        )
+        diagnostics: Dict[str, Any] = {
+            "live_allocated_mb": None,
+            "reserved_mb": None,
+            "reclaimable_cached_mb": None,
+            "cache_flushed": False,
+        }
+
+        if not self.is_cuda_available():
+            return diagnostics
+
+        try:
+            import torch
+
+            if torch.cuda.device_count() > 0:
+                allocated = torch.cuda.memory_allocated(0) / (1024 * 1024)
+                reserved = torch.cuda.memory_reserved(0) / (1024 * 1024)
+                reclaimable = max(0.0, reserved - allocated)
+                diagnostics["live_allocated_mb"] = round(allocated, 2)
+                diagnostics["reserved_mb"] = round(reserved, 2)
+                diagnostics["reclaimable_cached_mb"] = round(reclaimable, 2)
+
+                logger.warning(
+                    f"CUDA OOM Diagnostics: Live active tensors = {diagnostics['live_allocated_mb']} MB, "
+                    f"Allocator reserved = {diagnostics['reserved_mb']} MB, "
+                    f"Unused cache reclaimable = {diagnostics['reclaimable_cached_mb']} MB. "
+                    "Note: torch.cuda.empty_cache() releases only unused cache, not live model tensors."
+                )
+        except Exception as e:
+            logger.debug(f"Unable to read CUDA memory diagnostics during OOM: {e}")
+
+        # Trigger garbage collection and release unused cache blocks
         gc.collect()
         self.empty_cuda_cache()
+        diagnostics["cache_flushed"] = True
+        return diagnostics
 
 
 # Module-level default singleton

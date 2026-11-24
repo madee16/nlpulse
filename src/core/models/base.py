@@ -280,16 +280,48 @@ class BaseModel(ABC):
         self._active_inferences += 1
         self._last_used_at = datetime.now(timezone.utc)
 
+        # Worker thread lifecycle management:
+        # Cancelling an await on asyncio.to_thread does NOT terminate the OS thread.
+        # We ensure _active_inferences and _semaphore are released ONLY when the worker thread
+        # actually completes, preventing model unload or concurrency overflow during timeout.
+        worker_task = asyncio.ensure_future(
+            asyncio.to_thread(self._execute_inference, inputs, **kwargs)
+        )
+
+        slot_released = False
+        worker_timed_out = False
+
+        def _cleanup_worker(fut: asyncio.Future) -> None:
+            nonlocal slot_released
+            if not slot_released:
+                slot_released = True
+                self._active_inferences = max(0, self._active_inferences - 1)
+                self._semaphore.release()
+                # If caller already timed out, handle any deferred OOM cleanup here
+                if worker_timed_out and not fut.cancelled():
+                    try:
+                        exc = fut.exception()
+                        if exc and ("out of memory" in str(exc).lower() or "cuda oom" in str(exc).lower()):
+                            device_manager.handle_cuda_oom()
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+        worker_task.add_done_callback(_cleanup_worker)
+
         try:
-            # Execute synchronous inference off-loop to keep FastAPI fully non-blocking
+            # Shield worker_task so timeout cancellation does not cancel the task future
             result = await asyncio.wait_for(
-                asyncio.to_thread(self._execute_inference, inputs, **kwargs),
+                asyncio.shield(worker_task),
                 timeout=self.metadata.timeout_seconds,
             )
             self._total_inferences += 1
             return result
         except asyncio.TimeoutError as e:
-            logger.error(f"Inference execution for '{self.model_id}' exceeded {self.metadata.timeout_seconds}s timeout")
+            worker_timed_out = True
+            logger.error(
+                f"Inference execution for '{self.model_id}' exceeded {self.metadata.timeout_seconds}s timeout "
+                f"(underlying thread remains accounted for in active_inferences until it terminates)"
+            )
             raise ModelInferenceError(
                 self.model_id,
                 f"Inference execution timed out after {self.metadata.timeout_seconds}s",
@@ -306,9 +338,6 @@ class BaseModel(ABC):
                 exc_info=True,
             )
             raise ModelInferenceError(self.model_id, err_msg) from e
-        finally:
-            self._active_inferences = max(0, self._active_inferences - 1)
-            self._semaphore.release()
 
     def to_dict(self) -> Dict[str, Any]:
         """Produce a comprehensive monitoring status dictionary."""

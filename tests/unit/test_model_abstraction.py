@@ -164,16 +164,23 @@ async def test_model_unload_while_busy_fails(sample_metadata: ModelMetadata):
 
 @pytest.mark.asyncio
 async def test_model_inference_timeout(sample_metadata: ModelMetadata):
-    """Verify inference timing out raises ModelInferenceError."""
+    """Verify inference timing out raises ModelInferenceError and thread remains accounted for."""
     sample_metadata.timeout_seconds = 0.05
-    model = DummyModel(sample_metadata, delay=0.2)
+    model = DummyModel(sample_metadata, delay=0.15)
     await model.load("cpu")
 
     with pytest.raises(ModelInferenceError) as exc_info:
         await model.predict("slow input")
 
     assert "timed out" in str(exc_info.value.reason)
-    assert model.active_inferences == 0  # Cleaned up in finally
+    # The worker thread is still running, so active_inferences remains 1
+    assert model.active_inferences == 1
+    assert model.is_busy() is True
+
+    # Await thread completion
+    await asyncio.sleep(0.18)
+    assert model.active_inferences == 0
+    assert model.is_busy() is False
 
     await model.unload()
 
