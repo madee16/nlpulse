@@ -49,6 +49,8 @@ async def register_developer(
             "sentiment:read",
             "ner:read",
             "classification:read",
+            "keywords:read",
+            "summarization:read",
             "keys:read",
             "keys:write",
             "usage:read",

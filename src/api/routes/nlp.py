@@ -15,10 +15,15 @@ from src.db.session import get_db
 from src.models.api_key import APIKey
 from src.models.developer import Developer
 from src.schemas.nlp import (
+    EntityItem,
+    KeywordRequest,
+    KeywordResponse,
     NERRequest,
     NERResponse,
     SentimentRequest,
     SentimentResponse,
+    SummarizationRequest,
+    SummarizationResponse,
     ZeroShotRequest,
     ZeroShotResponse,
 )
@@ -112,3 +117,66 @@ async def classify_zero_shot(
         api_key_id=current_key.id,
     )
     return ZeroShotResponse(**result)
+
+
+@router.post(
+    "/keywords",
+    response_model=KeywordResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Extract and rank key concepts and n-grams using dense embeddings",
+    dependencies=[
+        Depends(require_scopes("keywords:read", "nlp:read", "analyze:read", "admin")),
+        Depends(check_rate_limit),
+        Depends(check_quota),
+    ],
+)
+async def extract_keywords(
+    payload: KeywordRequest,
+    current_key: APIKey = Depends(get_current_api_key),
+    developer: Developer = Depends(get_current_developer),
+    db: AsyncSession = Depends(get_db),
+    registry: ModelRegistry = Depends(get_model_registry),
+) -> KeywordResponse:
+    """Extract key terms and keyphrases from input text using embedding cosine similarity."""
+    service = NLPService(session=db, registry=registry)
+    result = await service.extract_keywords(
+        text=payload.text,
+        max_keywords=payload.max_keywords,
+        ngram_range=(payload.ngram_range[0], payload.ngram_range[1]),
+        candidates=payload.candidates,
+        developer_id=developer.id,
+        api_key_id=current_key.id,
+    )
+    return KeywordResponse(**result)
+
+
+@router.post(
+    "/summarization",
+    response_model=SummarizationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Generate abstractive summary of input document",
+    dependencies=[
+        Depends(require_scopes("summarization:read", "nlp:read", "analyze:read", "admin")),
+        Depends(check_rate_limit),
+        Depends(check_quota),
+    ],
+)
+async def summarize_text(
+    payload: SummarizationRequest,
+    current_key: APIKey = Depends(get_current_api_key),
+    developer: Developer = Depends(get_current_developer),
+    db: AsyncSession = Depends(get_db),
+    registry: ModelRegistry = Depends(get_model_registry),
+) -> SummarizationResponse:
+    """Generate a concise, coherent abstractive summary, handling long text via chunked consolidation."""
+    service = NLPService(session=db, registry=registry)
+    result = await service.summarize_text(
+        text=payload.text,
+        min_length=payload.min_length,
+        max_length=payload.max_length,
+        do_sample=payload.do_sample,
+        temperature=payload.temperature,
+        developer_id=developer.id,
+        api_key_id=current_key.id,
+    )
+    return SummarizationResponse(**result)

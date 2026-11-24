@@ -10,13 +10,14 @@
 
 ---
 
-## Current Status: M1, M2, M3 & M4 Complete ✅
+## Current Status: M1, M2, M3, M4 & M5 Complete ✅
 
 - ✅ **M1: Foundations & Database** — Project structure, PostgreSQL 16, async SQLAlchemy 2.x session lifecycle, models (`Developer`, `APIKey`, `UsageRecord`), and Alembic async migrations.
 - ✅ **M2: Security & Authentication** — API keys, SHA-256 constant-time hashing, scope enforcement, sliding window rate limiting, monthly database quotas, and tenant isolation.
 - ✅ **M3: Model Lifecycle Management** — Lazy model initialization, thread-safe `ModelRegistry`, LRU eviction with in-use protection, hardware detection (`DeviceManager` for CUDA GPU/CPU), per-model concurrency control, event-loop offloading via `asyncio.to_thread` with shielded thread lifecycle retention, and FastAPI lifespan integration.
-- ✅ **M4: Core NLP** — Sentiment analysis (`distilbert-base-uncased-finetuned-sst-2-english`), Named Entity Recognition (`bert-base-NER` with subword BPE token aggregation), and Zero-Shot text classification (`distilbart-mnli-12-1` with single-label softmax & multi-label sigmoid scoring). Complete end-to-end API integration with rate limiting, monthly quota enforcement, and per-tenant usage metering (98/98 unit & integration tests passing).
-- ⏳ **M5: Advanced NLP** — Next: Keyword extraction, summarization.
+- ✅ **M4: Core NLP** — Sentiment analysis (`distilbert-base-uncased-finetuned-sst-2-english`), Named Entity Recognition (`bert-base-NER` with subword BPE token aggregation), and Zero-Shot text classification (`distilbart-mnli-12-1` with single-label softmax & multi-label sigmoid scoring). Complete end-to-end API integration with rate limiting, monthly quota enforcement, and per-tenant usage metering.
+- ✅ **M5: Advanced NLP** — Dense embedding keyword and keyphrase extraction (`sentence-transformers/all-MiniLM-L6-v2` with cosine similarity ranking and customizable n-gram / stopword filtering) and abstractive document summarization (`sshleifer/distilbart-cnn-12-6` with sentence-bounded chunking and multi-pass consolidation). Fully integrated with LRU cache eviction, scopes (`keywords:read`, `summarization:read`), rate limits, quotas, and atomic usage metering (133/133 unit & integration tests passing).
+- ⏳ **M6: Generative NLP** — Next: Ollama integration, structured information extraction.
 
 ---
 
@@ -65,6 +66,7 @@
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── config.py         # Pydantic Settings & environment variables
+│   │   ├── nlp_utils.py      # Stopword filtering, n-gram extraction, and chunking
 │   │   ├── device.py         # Hardware detection, CUDA GPU/CPU & VRAM telemetry
 │   │   ├── exceptions.py     # Domain exceptions (Auth, Quota, RateLimit, Model, Device)
 │   │   ├── logging.py        # Structured JSON & console logging
@@ -117,6 +119,10 @@
         ├── test_models.py     # Model relationships, constraints, cascades
         ├── test_nlp_models.py # Sentiment, NER, and Zero-Shot model unit tests
         ├── test_nlp_service.py# NLPService inference & metering unit tests
+        ├── test_nlp_utils.py  # N-gram candidate extraction, stopwords, chunking tests
+        ├── test_m5_models.py  # EmbeddingModel and SummarizationModel unit tests
+        ├── test_m5_nlp_service.py # Keyword extraction & summarization service tests
+        ├── test_m5_lifecycle.py   # M5 lazy loading, concurrency & LRU eviction tests
         ├── test_rate_limiter.py # Sliding window rate limiter tests
         ├── test_security.py   # Cryptographic API key tests
         ├── test_security_audit_regression.py # Security audit regression tests
@@ -144,6 +150,31 @@
 | `GET` | `/api/v1/models/{model_id}` | `X-API-Key` | Retrieve model telemetry and loading state (`models:read` / `admin`) |
 | `POST` | `/api/v1/models/{model_id}/unload` | `X-API-Key` | Explicitly unload model and release GPU/RAM (`admin`) |
 | `GET` | `/api/v1/hardware` | `X-API-Key` | Inspect compute hardware, GPU availability, and VRAM (`admin`) |
+
+---
+
+---
+
+## Advanced NLP Architecture (Milestone 5)
+
+### 1. Keyword & Keyphrase Extraction Methodology
+NLPulse implements an embedding-based semantic keyword extractor inspired by KeyBERT:
+1. **Candidate N-Gram Generation:** Extracts words and phrases bounded by configurable n-gram ranges ($1 \le \text{min\_n} \le \text{max\_n} \le 3$).
+2. **Stopword Elimination:** Evaluates candidate edges against a comprehensive, zero-dependency English stopword set. Phrases beginning or ending with stopwords are pruned.
+3. **Dense Semantic Embedding:** Uses `sentence-transformers/all-MiniLM-L6-v2` (~22.7M parameters, ~90 MB memory) to generate 384-dimensional dense vectors with mean-pooling and L2 unit-normalization.
+4. **Cosine Similarity Ranking:** Calculates semantic similarity between the document vector and candidate vectors $\text{sim}(\mathbf{d}, \mathbf{c}) = \frac{\mathbf{d} \cdot \mathbf{c}}{\|\mathbf{d}\| \|\mathbf{c}\|}$, sorting results in descending relevance order.
+
+### 2. Abstractive Summarization & Long-Document Chunking
+1. **Sequence-to-Sequence Generation:** Leverages `sshleifer/distilbart-cnn-12-6` (~306M parameters, ~600 MB VRAM / ~1.2 GB RAM), fine-tuned on CNN/DailyMail for concise abstractive summarization.
+2. **Long-Document Strategy:** When input texts exceed the single-pass token limit (`SUMMARIZATION_CHUNK_SIZE=2500` characters), the document is split across sentence boundaries using `chunk_text_by_sentences`. Each chunk is summarized independently, followed by a consolidation pass across chunk summaries.
+3. **Usage Attribution:** Metering tracks `cost_units` equal to the number of document chunks processed, ensuring fair billing attribution.
+
+### 3. Hardware Requirements & Model Lifecycle
+- **Target Hardware:** Tested and validated for modern multicore CPUs and laptop GPUs (e.g. NVIDIA RTX 4050 6 GB VRAM, 16 GB RAM).
+- **LRU Cache Protection:** With `MODEL_MAX_CACHED=3`, loading subsequent models automatically evicts the least recently used idle model while shielding active inferences.
+- **Known Limitations:**
+  - *Information Compression:* Abstractive summarization compresses text, which can omit minor contextual nuances in highly technical documents.
+  - *Hallucination Risk:* As with all pretrained autoregressive sequence-to-sequence models, extreme length constraints or domain-specific jargon may produce mild phrasing hallucinations.
 
 ---
 
@@ -245,7 +276,7 @@ tests/unit/test_services.py::test_api_key_expired_rejection PASSED
 tests/unit/test_services.py::test_usage_service_quota_enforcement PASSED
 tests/unit/test_tenant_isolation.py::test_tenant_isolation_api_keys PASSED
 tests/unit/test_tenant_isolation.py::test_tenant_isolation_usage_records PASSED
-====================== 98 passed, 3 deselected in 9.17s =======================
+====================== 133 passed, 3 deselected in 9.45s ======================
 ```
 
 ---
@@ -258,8 +289,8 @@ tests/unit/test_tenant_isolation.py::test_tenant_isolation_usage_records PASSED
 | **M2** | Security & Authentication | API keys, authentication, scopes, rate limiting, quotas | ✅ Complete |
 | **M3** | Model Lifecycle Management | Model loading, caching, GPU/CPU management, concurrency | ✅ Complete |
 | **M4** | Core NLP | Sentiment analysis, NER, zero-shot classification | ✅ Complete |
-| **M5** | Advanced NLP | Keyword extraction, summarization | ⏳ Next |
-| **M6** | Generative NLP | Ollama integration, structured information extraction | 📋 Planned |
+| **M5** | Advanced NLP | Keyword extraction, summarization | ✅ Complete |
+| **M6** | Generative NLP | Ollama integration, structured information extraction | ⏳ Next |
 | **M7** | Batch Processing | Efficient multi-text inference and benchmarking | 📋 Planned |
 | **M8** | Integration & Verification | API integration, end-to-end tests, security verification | 📋 Planned |
 | **M9** | Documentation & Portfolio | README, architecture docs, ADRs, interview preparation, final release | 📋 Planned |

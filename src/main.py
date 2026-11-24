@@ -20,7 +20,13 @@ from src.core.device import DeviceManager
 from src.core.exceptions import NLPulseException, RateLimitExceededError
 from src.core.logging import get_logger, setup_logging
 from src.core.models.base import ModelMetadata
-from src.core.models.nlp import NERModel, SentimentModel, ZeroShotClassificationModel
+from src.core.models.nlp import (
+    EmbeddingModel,
+    NERModel,
+    SentimentModel,
+    SummarizationModel,
+    ZeroShotClassificationModel,
+)
 from src.db.session import engine
 from src.services.model_registry import ModelRegistry
 
@@ -86,6 +92,36 @@ def _register_default_models(registry: ModelRegistry) -> None:
     )
     if not registry.is_registered(settings.MODEL_ZERO_SHOT_ID):
         registry.register(zero_shot_meta, lambda: ZeroShotClassificationModel(zero_shot_meta))
+
+    # 4. Sentence Embeddings & Keyword Extraction (M5)
+    embedding_meta = ModelMetadata(
+        model_id=settings.MODEL_EMBEDDING_ID,
+        name="MiniLM Sentence Embeddings",
+        task="embedding",
+        version="1.0.0",
+        description="All-MiniLM-L6-v2 sentence embedding model for dense representation and semantic search",
+        vram_estimate_mb=90.0,
+        ram_estimate_mb=120.0,
+        max_concurrency=settings.MODEL_DEFAULT_CONCURRENCY,
+        timeout_seconds=settings.MODEL_INFERENCE_TIMEOUT_SECONDS,
+    )
+    if not registry.is_registered(settings.MODEL_EMBEDDING_ID):
+        registry.register(embedding_meta, lambda: EmbeddingModel(embedding_meta))
+
+    # 5. Abstractive Text Summarization (M5)
+    summarization_meta = ModelMetadata(
+        model_id=settings.MODEL_SUMMARIZATION_ID,
+        name="DistilBART CNN Summarization",
+        task="summarization",
+        version="1.0.0",
+        description="DistilBART fine-tuned on CNN/DailyMail for abstractive document summarization",
+        vram_estimate_mb=600.0,
+        ram_estimate_mb=1200.0,
+        max_concurrency=settings.MODEL_DEFAULT_CONCURRENCY,
+        timeout_seconds=settings.MODEL_INFERENCE_TIMEOUT_SECONDS,
+    )
+    if not registry.is_registered(settings.MODEL_SUMMARIZATION_ID):
+        registry.register(summarization_meta, lambda: SummarizationModel(summarization_meta))
 
 
 @asynccontextmanager

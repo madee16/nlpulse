@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     MODEL_ZERO_SHOT_ID: str = "valhalla/distilbart-mnli-12-1"
     NLP_MAX_TEXT_LENGTH: int = 5000
 
+    # Advanced NLP Models (M5)
+    MODEL_EMBEDDING_ID: str = "sentence-transformers/all-MiniLM-L6-v2"
+    MODEL_SUMMARIZATION_ID: str = "sshleifer/distilbart-cnn-12-6"
+    KEYWORD_MAX_CANDIDATES: int = 100
+    SUMMARIZATION_CHUNK_SIZE: int = 2500
+
     # CORS
     CORS_ORIGINS: Union[List[str], str] = ["*"]
 

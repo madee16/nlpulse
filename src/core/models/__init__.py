@@ -1,7 +1,13 @@
 """Model lifecycle abstractions, metadata, and base model interfaces."""
 
 from src.core.models.base import BaseModel, ModelMetadata, ModelState
-from src.core.models.nlp import NERModel, SentimentModel, ZeroShotClassificationModel
+from src.core.models.nlp import (
+    EmbeddingModel,
+    NERModel,
+    SentimentModel,
+    SummarizationModel,
+    ZeroShotClassificationModel,
+)
 
 __all__ = [
     "BaseModel",
@@ -10,4 +16,6 @@ __all__ = [
     "SentimentModel",
     "NERModel",
     "ZeroShotClassificationModel",
+    "EmbeddingModel",
+    "SummarizationModel",
 ]

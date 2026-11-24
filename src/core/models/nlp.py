@@ -288,3 +288,193 @@ class ZeroShotClassificationModel(BaseModel):
             "predictions": predictions,
             "multi_label": multi_label,
         }
+
+
+class EmbeddingModel(BaseModel):
+    """Embedding model computing normalized mean-pooled dense vectors (all-MiniLM-L6-v2)."""
+
+    def __init__(
+        self,
+        metadata: Optional[ModelMetadata] = None,
+        pipeline_factory: Optional[Callable[[], Any]] = None,
+    ) -> None:
+        if metadata is None:
+            metadata = ModelMetadata(
+                model_id=settings.MODEL_EMBEDDING_ID,
+                name="MiniLM Sentence Embeddings",
+                task="embedding",
+                vram_estimate_mb=90.0,
+                ram_estimate_mb=120.0,
+                max_concurrency=settings.MODEL_DEFAULT_CONCURRENCY,
+                timeout_seconds=settings.MODEL_INFERENCE_TIMEOUT_SECONDS,
+            )
+        super().__init__(metadata)
+        self.pipeline_factory = pipeline_factory
+        self._tokenizer = None
+        self._model = None
+        self._device_str = "cpu"
+
+    def _load_weights(self, device: str) -> None:
+        if self.pipeline_factory:
+            self._model = self.pipeline_factory()
+            self._device_str = device
+            return
+
+        from transformers import AutoModel, AutoTokenizer
+
+        self._device_str = device
+        logger.info(
+            f"Loading embedding model '{self.metadata.model_id}' onto {device}",
+            extra={"model_id": self.metadata.model_id, "device": device},
+        )
+        self._tokenizer = AutoTokenizer.from_pretrained(self.metadata.model_id)
+        model = AutoModel.from_pretrained(self.metadata.model_id)
+        if device == "cuda":
+            model = model.cuda()
+        else:
+            model = model.cpu()
+        model.eval()
+        self._model = model
+
+    def _unload_weights(self) -> None:
+        self._tokenizer = None
+        self._model = None
+        gc.collect()
+
+    def _execute_inference(self, inputs: Any, **kwargs: Any) -> Any:
+        """Compute L2-normalized embeddings for a list of strings (or single string).
+
+        Args:
+            inputs: String or List of strings.
+
+        Returns:
+            Numpy array of shape (N, D) containing unit-normalized dense embeddings.
+        """
+        import numpy as np
+
+        if isinstance(inputs, str):
+            texts = [inputs]
+        elif isinstance(inputs, list):
+            texts = inputs
+        else:
+            raise ValueError(f"Expected str or List[str] for embedding input, got {type(inputs).__name__}")
+
+        if not texts:
+            return np.empty((0, 384), dtype=np.float32)
+
+        # Handle mock factory
+        if callable(self._model) and not hasattr(self._model, "eval"):
+            return self._model(texts)
+
+        import torch
+
+        encoded = self._tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors="pt",
+        )
+        if self._device_str == "cuda" and torch.cuda.is_available():
+            encoded = {k: v.cuda() for k, v in encoded.items()}
+
+        with torch.no_grad():
+            outputs = self._model(**encoded)
+            token_embeddings = outputs[0]
+            attention_mask = encoded["attention_mask"].unsqueeze(-1).expand(token_embeddings.size()).float()
+            sum_embeddings = torch.sum(token_embeddings * attention_mask, 1)
+            sum_mask = torch.clamp(attention_mask.sum(1), min=1e-9)
+            embeddings = sum_embeddings / sum_mask
+            normalized = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+
+        return normalized.cpu().numpy()
+
+
+class SummarizationModel(BaseModel):
+    """Abstractive text summarization using sequence-to-sequence transformers."""
+
+    def __init__(
+        self,
+        metadata: Optional[ModelMetadata] = None,
+        pipeline_factory: Optional[Callable[[], Any]] = None,
+    ) -> None:
+        if metadata is None:
+            metadata = ModelMetadata(
+                model_id=settings.MODEL_SUMMARIZATION_ID,
+                name="DistilBART CNN Summarization",
+                task="summarization",
+                vram_estimate_mb=600.0,
+                ram_estimate_mb=1200.0,
+                max_concurrency=settings.MODEL_DEFAULT_CONCURRENCY,
+                timeout_seconds=settings.MODEL_INFERENCE_TIMEOUT_SECONDS,
+            )
+        super().__init__(metadata)
+        self.pipeline_factory = pipeline_factory
+        self._pipeline = None
+
+    def _load_weights(self, device: str) -> None:
+        if self.pipeline_factory:
+            self._pipeline = self.pipeline_factory()
+            return
+
+        from transformers import pipeline
+
+        device_arg = 0 if device == "cuda" else -1
+        logger.info(
+            f"Loading summarization model weights '{self.metadata.model_id}' onto {device}",
+            extra={"model_id": self.metadata.model_id, "device": device},
+        )
+        self._pipeline = pipeline(
+            "summarization",
+            model=self.metadata.model_id,
+            device=device_arg,
+        )
+
+    def _unload_weights(self) -> None:
+        self._pipeline = None
+        gc.collect()
+
+    def _execute_inference(self, inputs: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Perform text summarization forward pass.
+
+        Args:
+            inputs: Dictionary with keys 'text', optional 'max_length', 'min_length', 'do_sample'.
+
+        Returns:
+            Dictionary with 'summary_text'.
+        """
+        if not isinstance(inputs, dict):
+            raise ValueError("Summarization input must be a dictionary with 'text' and optional length constraints")
+
+        text = inputs.get("text", "")
+        if not text or not text.strip():
+            raise ValueError("Input text cannot be empty for summarization")
+
+        max_length = int(inputs.get("max_length", 130))
+        min_length = int(inputs.get("min_length", 30))
+        do_sample = bool(inputs.get("do_sample", False))
+
+        if min_length > max_length:
+            raise ValueError(f"min_length ({min_length}) cannot exceed max_length ({max_length})")
+
+        pipe_kwargs: Dict[str, Any] = {
+            "max_length": max_length,
+            "min_length": min_length,
+            "do_sample": do_sample,
+            "truncation": True,
+        }
+        if "temperature" in inputs and inputs["temperature"] is not None:
+            pipe_kwargs["temperature"] = float(inputs["temperature"])
+
+        raw_output = self._pipeline(text, **pipe_kwargs)
+
+        if isinstance(raw_output, list) and len(raw_output) > 0 and isinstance(raw_output[0], dict):
+            summary_text = raw_output[0].get("summary_text", "").strip()
+        elif isinstance(raw_output, dict):
+            summary_text = raw_output.get("summary_text", "").strip()
+        elif isinstance(raw_output, str):
+            summary_text = raw_output.strip()
+        else:
+            raise ValueError(f"Unexpected summarization pipeline return format: {type(raw_output).__name__}")
+
+        return {"summary_text": summary_text}

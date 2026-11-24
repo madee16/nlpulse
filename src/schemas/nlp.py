@@ -107,3 +107,100 @@ class ZeroShotResponse(BaseModel):
     multi_label: bool = Field(..., description="Classification probability mode employed")
     model_id: str = Field(..., description="Model identifier utilized for inference")
     latency_ms: float = Field(..., description="Inference execution latency in milliseconds")
+
+
+# -----------------------------------------------------------------------------
+# Keyword & Keyphrase Extraction (M5)
+# -----------------------------------------------------------------------------
+
+class KeywordItem(BaseModel):
+    """An individual extracted keyword or keyphrase with relevance score."""
+
+    keyword: str = Field(..., description="Extracted keyword or keyphrase")
+    score: float = Field(..., description="Cosine similarity relevance score against document embedding")
+
+
+class KeywordRequest(BaseModel):
+    """Payload for embedding-based keyword and keyphrase extraction."""
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=5000,
+        description="Text document to analyze for key concepts",
+        examples=["FastAPI provides automatic OpenAPI documentation and high asynchronous throughput."],
+    )
+    max_keywords: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="Maximum number of top keywords to return",
+    )
+    ngram_range: List[int] = Field(
+        default=[1, 1],
+        min_length=2,
+        max_length=2,
+        description="N-gram length bounds [min_n, max_n] for candidate phrases (e.g. [1, 2] for unigrams and bigrams)",
+    )
+    candidates: Optional[List[str]] = Field(
+        default=None,
+        description="Optional list of specific candidate phrases to filter and rank",
+    )
+
+
+class KeywordResponse(BaseModel):
+    """Structured response containing ranked keywords and extraction telemetry."""
+
+    keywords: List[KeywordItem] = Field(..., description="Ranked keywords in descending relevance order")
+    total_candidates: int = Field(..., description="Total candidate n-grams evaluated")
+    model_id: str = Field(..., description="Embedding model identifier utilized for extraction")
+    latency_ms: float = Field(..., description="Inference execution latency in milliseconds")
+
+
+# -----------------------------------------------------------------------------
+# Abstractive Text Summarization (M5)
+# -----------------------------------------------------------------------------
+
+class SummarizationRequest(BaseModel):
+    """Payload for abstractive document summarization."""
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=10000,
+        description="Document or passage to summarize",
+        examples=["PostgreSQL 16 introduces enhanced logical replication and query execution optimizations..."],
+    )
+    min_length: int = Field(
+        default=30,
+        ge=5,
+        le=500,
+        description="Minimum target length in tokens for generated summary",
+    )
+    max_length: int = Field(
+        default=130,
+        ge=10,
+        le=1000,
+        description="Maximum target length in tokens for generated summary",
+    )
+    do_sample: bool = Field(
+        default=False,
+        description="Whether to use multinomial sampling instead of greedy beam search",
+    )
+    temperature: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature if do_sample is True",
+    )
+
+
+class SummarizationResponse(BaseModel):
+    """Structured response containing generated summary and chunking telemetry."""
+
+    summary: str = Field(..., description="Coherent abstractive summary text")
+    original_character_count: int = Field(..., description="Original input document character count")
+    summary_character_count: int = Field(..., description="Generated summary character count")
+    chunks_processed: int = Field(..., description="Total document chunks processed and consolidated")
+    model_id: str = Field(..., description="Summarization model identifier utilized")
+    latency_ms: float = Field(..., description="Total inference latency in milliseconds")

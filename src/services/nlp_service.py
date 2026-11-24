@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import get_settings
 from src.core.exceptions import NLPulseException
 from src.core.logging import get_logger
-from src.core.models.nlp import NERModel, SentimentModel, ZeroShotClassificationModel
+from src.core.models.nlp import (
+    EmbeddingModel,
+    NERModel,
+    SentimentModel,
+    SummarizationModel,
+    ZeroShotClassificationModel,
+)
+from src.core.nlp_utils import chunk_text_by_sentences, extract_candidate_ngrams
 from src.services.model_registry import ModelRegistry, model_registry
 from src.services.usage_service import UsageService
 
@@ -38,15 +46,16 @@ class NLPService:
         self.registry = registry or model_registry
         self.usage_service = UsageService(session)
 
-    def _validate_text(self, text: str) -> str:
+    def _validate_text(self, text: str, max_length: Optional[int] = None) -> str:
         """Validate raw text input length and non-empty constraints."""
         if not text or not text.strip():
             raise NLPValidationError("Input text cannot be empty or solely whitespace.")
 
         clean_text = text.strip()
-        if len(clean_text) > settings.NLP_MAX_TEXT_LENGTH:
+        limit = max_length or settings.NLP_MAX_TEXT_LENGTH
+        if len(clean_text) > limit:
             raise NLPValidationError(
-                f"Input text exceeds maximum allowed length of {settings.NLP_MAX_TEXT_LENGTH} characters "
+                f"Input text exceeds maximum allowed length of {limit} characters "
                 f"(received {len(clean_text)} characters)."
             )
         return clean_text
@@ -173,6 +182,194 @@ class NLPService:
 
         return {
             **inference_result,
+            "model_id": model_id,
+            "latency_ms": latency_ms,
+        }
+
+    async def extract_keywords(
+        self,
+        text: str,
+        developer_id: uuid.UUID,
+        max_keywords: int = 5,
+        ngram_range: Tuple[int, int] = (1, 1),
+        candidates: Optional[List[str]] = None,
+        api_key_id: Optional[uuid.UUID] = None,
+    ) -> Dict[str, Any]:
+        """Extract and rank keywords/keyphrases using dense sentence embeddings and cosine similarity."""
+        clean_text = self._validate_text(text)
+
+        if max_keywords < 1 or max_keywords > 50:
+            raise NLPValidationError(f"max_keywords must be between 1 and 50 (received {max_keywords}).")
+
+        if len(ngram_range) != 2:
+            raise NLPValidationError("ngram_range must be a tuple or list of exactly two integers [min_n, max_n].")
+
+        min_n, max_n = ngram_range
+        if min_n < 1 or max_n < min_n or max_n > 3:
+            raise NLPValidationError(
+                f"Invalid ngram_range ({min_n}, {max_n}). Must satisfy 1 <= min_n <= max_n <= 3."
+            )
+
+        candidate_phrases = extract_candidate_ngrams(
+            text=clean_text,
+            ngram_range=(min_n, max_n),
+            candidate_filter=candidates,
+            max_candidates=settings.KEYWORD_MAX_CANDIDATES,
+        )
+
+        model_id = settings.MODEL_EMBEDDING_ID
+
+        # Edge case: text contains zero valid candidates (e.g. only stopwords)
+        if not candidate_phrases:
+            start = time.perf_counter()
+            latency_ms = round((time.perf_counter() - start) * 1000, 2)
+            await self.usage_service.record_usage(
+                developer_id=developer_id,
+                api_key_id=api_key_id,
+                endpoint=f"{settings.API_V1_PREFIX}/nlp/keywords",
+                method="POST",
+                status_code=200,
+                latency_ms=latency_ms,
+                input_character_count=len(clean_text),
+                cost_units=1,
+            )
+            return {
+                "keywords": [],
+                "total_candidates": 0,
+                "model_id": model_id,
+                "latency_ms": latency_ms,
+            }
+
+        model = await self.registry.get_model(model_id)
+
+        start = time.perf_counter()
+        # Compute embeddings for document and candidate phrases in a single batch
+        all_texts = [clean_text] + candidate_phrases
+        embeddings = await model.predict(all_texts)
+
+        # Normalize and compute cosine similarities
+        doc_emb = embeddings[0]
+        cand_embs = embeddings[1:]
+
+        # Compute cosine similarities
+        dot_products = np.dot(cand_embs, doc_emb)
+        doc_norm = np.linalg.norm(doc_emb)
+        cand_norms = np.linalg.norm(cand_embs, axis=1)
+        sim_scores = dot_products / (np.maximum(doc_norm * cand_norms, 1e-9))
+
+        ranked: List[Dict[str, Any]] = [
+            {"keyword": phrase, "score": round(float(score), 4)}
+            for phrase, score in zip(candidate_phrases, sim_scores)
+        ]
+        # Sort descending by relevance score
+        ranked.sort(key=lambda x: x["score"], reverse=True)
+        top_keywords = ranked[:max_keywords]
+        latency_ms = round((time.perf_counter() - start) * 1000, 2)
+
+        # Record usage
+        await self.usage_service.record_usage(
+            developer_id=developer_id,
+            api_key_id=api_key_id,
+            endpoint=f"{settings.API_V1_PREFIX}/nlp/keywords",
+            method="POST",
+            status_code=200,
+            latency_ms=latency_ms,
+            input_character_count=len(clean_text),
+            cost_units=1,
+        )
+
+        return {
+            "keywords": top_keywords,
+            "total_candidates": len(candidate_phrases),
+            "model_id": model_id,
+            "latency_ms": latency_ms,
+        }
+
+    async def summarize_text(
+        self,
+        text: str,
+        developer_id: uuid.UUID,
+        min_length: int = 30,
+        max_length: int = 130,
+        do_sample: bool = False,
+        temperature: Optional[float] = None,
+        api_key_id: Optional[uuid.UUID] = None,
+    ) -> Dict[str, Any]:
+        """Generate abstractive text summary, handling long documents via chunking and consolidation."""
+        clean_text = self._validate_text(text, max_length=10000)
+
+        if min_length < 5 or max_length < min_length or max_length > 1000:
+            raise NLPValidationError(
+                f"Invalid length constraints: min_length={min_length}, max_length={max_length}. "
+                "Must satisfy 5 <= min_length <= max_length <= 1000."
+            )
+
+        if temperature is not None and (temperature < 0.0 or temperature > 2.0):
+            raise NLPValidationError("temperature must be between 0.0 and 2.0.")
+
+        model_id = settings.MODEL_SUMMARIZATION_ID
+        model = await self.registry.get_model(model_id)
+
+        start = time.perf_counter()
+        # Chunk text if document exceeds chunk size
+        chunks = chunk_text_by_sentences(clean_text, chunk_size=settings.SUMMARIZATION_CHUNK_SIZE)
+
+        if len(chunks) == 1:
+            # Single-pass summarization
+            res = await model.predict({
+                "text": chunks[0],
+                "min_length": min_length,
+                "max_length": max_length,
+                "do_sample": do_sample,
+                "temperature": temperature,
+            })
+            final_summary = res["summary_text"]
+        else:
+            # Multi-chunk processing and consolidation pass
+            chunk_summaries = []
+            chunk_max_len = max(min_length, min(max_length, 80))
+            chunk_min_len = min(min_length, 20)
+
+            for chunk in chunks:
+                chunk_res = await model.predict({
+                    "text": chunk,
+                    "min_length": chunk_min_len,
+                    "max_length": chunk_max_len,
+                    "do_sample": do_sample,
+                    "temperature": temperature,
+                })
+                chunk_summaries.append(chunk_res["summary_text"])
+
+            consolidated_input = " ".join(chunk_summaries)
+            # Final consolidation pass
+            final_res = await model.predict({
+                "text": consolidated_input,
+                "min_length": min_length,
+                "max_length": max_length,
+                "do_sample": do_sample,
+                "temperature": temperature,
+            })
+            final_summary = final_res["summary_text"]
+
+        latency_ms = round((time.perf_counter() - start) * 1000, 2)
+
+        # Record usage: cost units proportional to chunks processed
+        await self.usage_service.record_usage(
+            developer_id=developer_id,
+            api_key_id=api_key_id,
+            endpoint=f"{settings.API_V1_PREFIX}/nlp/summarization",
+            method="POST",
+            status_code=200,
+            latency_ms=latency_ms,
+            input_character_count=len(clean_text),
+            cost_units=len(chunks),
+        )
+
+        return {
+            "summary": final_summary,
+            "original_character_count": len(clean_text),
+            "summary_character_count": len(final_summary),
+            "chunks_processed": len(chunks),
             "model_id": model_id,
             "latency_ms": latency_ms,
         }

@@ -18,11 +18,16 @@ from src.schemas.model import (
 )
 from src.schemas.nlp import (
     EntityItem,
+    KeywordItem,
+    KeywordRequest,
+    KeywordResponse,
     LabelScore,
     NERRequest,
     NERResponse,
     SentimentRequest,
     SentimentResponse,
+    SummarizationRequest,
+    SummarizationResponse,
     ZeroShotRequest,
     ZeroShotResponse,
 )
@@ -49,4 +54,9 @@ __all__ = [
     "ZeroShotRequest",
     "ZeroShotResponse",
     "LabelScore",
+    "KeywordItem",
+    "KeywordRequest",
+    "KeywordResponse",
+    "SummarizationRequest",
+    "SummarizationResponse",
 ]
