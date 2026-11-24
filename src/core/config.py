@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     MODEL_INFERENCE_TIMEOUT_SECONDS: float = 30.0
     MODEL_ENABLE_WARMUP: bool = False
 
+    # Core NLP Models (M4)
+    MODEL_SENTIMENT_ID: str = "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+    MODEL_NER_ID: str = "dslim/bert-base-NER"
+    MODEL_ZERO_SHOT_ID: str = "valhalla/distilbart-mnli-12-1"
+    NLP_MAX_TEXT_LENGTH: int = 5000
+
     # CORS
     CORS_ORIGINS: Union[List[str], str] = ["*"]
 

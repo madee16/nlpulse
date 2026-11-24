@@ -10,12 +10,13 @@
 
 ---
 
-## Current Status: M1, M2 & M3 Complete ✅
+## Current Status: M1, M2, M3 & M4 Complete ✅
 
 - ✅ **M1: Foundations & Database** — Project structure, PostgreSQL 16, async SQLAlchemy 2.x session lifecycle, models (`Developer`, `APIKey`, `UsageRecord`), and Alembic async migrations.
 - ✅ **M2: Security & Authentication** — API keys, SHA-256 constant-time hashing, scope enforcement, sliding window rate limiting, monthly database quotas, and tenant isolation.
-- ✅ **M3: Model Lifecycle Management** — Lazy model initialization, thread-safe `ModelRegistry`, LRU eviction with in-use protection, hardware detection (`DeviceManager` for CUDA GPU/CPU), per-model concurrency control, event-loop offloading via `asyncio.to_thread`, and FastAPI lifespan integration (72/72 tests passing).
-- ⏳ **M4: Core NLP** — Next: Sentiment analysis, Named Entity Recognition (NER), zero-shot classification.
+- ✅ **M3: Model Lifecycle Management** — Lazy model initialization, thread-safe `ModelRegistry`, LRU eviction with in-use protection, hardware detection (`DeviceManager` for CUDA GPU/CPU), per-model concurrency control, event-loop offloading via `asyncio.to_thread` with shielded thread lifecycle retention, and FastAPI lifespan integration.
+- ✅ **M4: Core NLP** — Sentiment analysis (`distilbert-base-uncased-finetuned-sst-2-english`), Named Entity Recognition (`bert-base-NER` with subword BPE token aggregation), and Zero-Shot text classification (`distilbart-mnli-12-1` with single-label softmax & multi-label sigmoid scoring). Complete end-to-end API integration with rate limiting, monthly quota enforcement, and per-tenant usage metering (98/98 unit & integration tests passing).
+- ⏳ **M5: Advanced NLP** — Next: Keyword extraction, summarization.
 
 ---
 
@@ -69,7 +70,8 @@
 │   │   ├── logging.py        # Structured JSON & console logging
 │   │   ├── models/           # Standardized model lifecycle base abstractions
 │   │   │   ├── __init__.py
-│   │   │   └── base.py       # BaseModel, ModelMetadata, ModelState, concurrency guards
+│   │   │   ├── base.py       # BaseModel, ModelMetadata, ModelState, concurrency guards
+│   │   │   └── nlp.py        # Sentiment, NER, and Zero-Shot model implementations
 │   │   ├── rate_limiter.py   # Thread-safe striped sliding window rate limiter
 │   │   └── security.py       # SHA-256 API key hashing & constant-time comparison
 │   ├── db/
@@ -86,12 +88,14 @@
 │   │   ├── api_key.py        # API key request/response schemas
 │   │   ├── developer.py      # Developer registration/profile schemas
 │   │   ├── model.py          # Model telemetry & hardware metrics schemas
+│   │   ├── nlp.py            # NLP requests, responses, and entity schemas
 │   │   └── usage.py          # Usage summary schemas
 │   └── services/
 │       ├── __init__.py
 │       ├── api_key_service.py   # Key issuance, hashing, and auth
 │       ├── developer_service.py # Tenant management & quota assignment
 │       ├── model_registry.py    # Lazy loading, LRU caching, eviction & locks
+│       ├── nlp_service.py       # Core NLP orchestration & atomic usage metering
 │       └── usage_service.py     # Metering & calendar month quota checks
 └── tests/
     ├── __init__.py
@@ -107,9 +111,12 @@
         ├── test_device.py     # Hardware detection & CUDA fallback tests
         ├── test_health.py     # Health check endpoint tests
         ├── test_logging.py    # Structured logging tests
+        ├── test_m3_lifecycle_hardening.py # Thread retention & CUDA OOM tests
         ├── test_model_abstraction.py # BaseModel lifecycle, semaphore & offloading tests
         ├── test_model_registry.py    # Lazy load, per-model lock & LRU cache tests
         ├── test_models.py     # Model relationships, constraints, cascades
+        ├── test_nlp_models.py # Sentiment, NER, and Zero-Shot model unit tests
+        ├── test_nlp_service.py# NLPService inference & metering unit tests
         ├── test_rate_limiter.py # Sliding window rate limiter tests
         ├── test_security.py   # Cryptographic API key tests
         ├── test_security_audit_regression.py # Security audit regression tests
@@ -119,7 +126,7 @@
 
 ---
 
-## API Endpoints (Milestones 1, 2 & 3)
+## API Endpoints (Milestones 1, 2, 3 & 4)
 
 | Method | Endpoint | Auth Required | Description |
 | :--- | :--- | :--- | :--- |
@@ -238,7 +245,7 @@ tests/unit/test_services.py::test_api_key_expired_rejection PASSED
 tests/unit/test_services.py::test_usage_service_quota_enforcement PASSED
 tests/unit/test_tenant_isolation.py::test_tenant_isolation_api_keys PASSED
 tests/unit/test_tenant_isolation.py::test_tenant_isolation_usage_records PASSED
-============================= 72 passed in 7.44s ==============================
+====================== 98 passed, 3 deselected in 9.17s =======================
 ```
 
 ---
@@ -250,8 +257,8 @@ tests/unit/test_tenant_isolation.py::test_tenant_isolation_usage_records PASSED
 | **M1** | Foundations & Database | Project structure, PostgreSQL, SQLAlchemy, models, migrations | ✅ Complete |
 | **M2** | Security & Authentication | API keys, authentication, scopes, rate limiting, quotas | ✅ Complete |
 | **M3** | Model Lifecycle Management | Model loading, caching, GPU/CPU management, concurrency | ✅ Complete |
-| **M4** | Core NLP | Sentiment analysis, NER, zero-shot classification | ⏳ Next |
-| **M5** | Advanced NLP | Keyword extraction, summarization | 📋 Planned |
+| **M4** | Core NLP | Sentiment analysis, NER, zero-shot classification | ✅ Complete |
+| **M5** | Advanced NLP | Keyword extraction, summarization | ⏳ Next |
 | **M6** | Generative NLP | Ollama integration, structured information extraction | 📋 Planned |
 | **M7** | Batch Processing | Efficient multi-text inference and benchmarking | 📋 Planned |
 | **M8** | Integration & Verification | API integration, end-to-end tests, security verification | 📋 Planned |

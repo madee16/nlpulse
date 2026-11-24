@@ -12,12 +12,15 @@ from src.api.routes.developers import router as developers_router
 from src.api.routes.health import router as health_router
 from src.api.routes.keys import router as keys_router
 from src.api.routes.models import router as models_router
+from src.api.routes.nlp import router as nlp_router
 from src.api.routes.protected import router as protected_router
 from src.api.routes.usage import router as usage_router
 from src.core.config import get_settings
 from src.core.device import DeviceManager
 from src.core.exceptions import NLPulseException, RateLimitExceededError
 from src.core.logging import get_logger, setup_logging
+from src.core.models.base import ModelMetadata
+from src.core.models.nlp import NERModel, SentimentModel, ZeroShotClassificationModel
 from src.db.session import engine
 from src.services.model_registry import ModelRegistry
 
@@ -37,6 +40,54 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+def _register_default_models(registry: ModelRegistry) -> None:
+    """Register standard M4 NLP model definitions into the registry for lazy loading."""
+    # 1. Sentiment Analysis
+    sentiment_meta = ModelMetadata(
+        model_id=settings.MODEL_SENTIMENT_ID,
+        name="DistilBERT Sentiment Analysis",
+        task="sentiment",
+        version="1.0.0",
+        description="DistilBERT fine-tuned on SST-2 for sentiment classification",
+        vram_estimate_mb=270.0,
+        ram_estimate_mb=350.0,
+        max_concurrency=settings.MODEL_DEFAULT_CONCURRENCY,
+        timeout_seconds=settings.MODEL_INFERENCE_TIMEOUT_SECONDS,
+    )
+    if not registry.is_registered(settings.MODEL_SENTIMENT_ID):
+        registry.register(sentiment_meta, lambda: SentimentModel(sentiment_meta))
+
+    # 2. Named Entity Recognition
+    ner_meta = ModelMetadata(
+        model_id=settings.MODEL_NER_ID,
+        name="BERT Named Entity Recognition",
+        task="ner",
+        version="1.0.0",
+        description="BERT fine-tuned on CoNLL-2003 for entity span extraction",
+        vram_estimate_mb=420.0,
+        ram_estimate_mb=500.0,
+        max_concurrency=settings.MODEL_DEFAULT_CONCURRENCY,
+        timeout_seconds=settings.MODEL_INFERENCE_TIMEOUT_SECONDS,
+    )
+    if not registry.is_registered(settings.MODEL_NER_ID):
+        registry.register(ner_meta, lambda: NERModel(ner_meta))
+
+    # 3. Zero-Shot Classification
+    zero_shot_meta = ModelMetadata(
+        model_id=settings.MODEL_ZERO_SHOT_ID,
+        name="DistilBART Zero-Shot Classification",
+        task="zero-shot",
+        version="1.0.0",
+        description="DistilBART fine-tuned on MNLI for zero-shot text classification",
+        vram_estimate_mb=550.0,
+        ram_estimate_mb=700.0,
+        max_concurrency=settings.MODEL_DEFAULT_CONCURRENCY,
+        timeout_seconds=settings.MODEL_INFERENCE_TIMEOUT_SECONDS,
+    )
+    if not registry.is_registered(settings.MODEL_ZERO_SHOT_ID):
+        registry.register(zero_shot_meta, lambda: ZeroShotClassificationModel(zero_shot_meta))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan context manager for startup and shutdown events."""
@@ -45,6 +96,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize compute device and model registry in application state
     device_mgr = DeviceManager(preference=settings.MODEL_DEVICE_PREFERENCE)
     registry = ModelRegistry(device_mgr=device_mgr, max_cached_models=settings.MODEL_MAX_CACHED)
+
+    # Register core NLP models (lazy loaded on demand, zero weight download on startup)
+    _register_default_models(registry)
+
     app.state.device_manager = device_mgr
     app.state.model_registry = registry
 
@@ -118,6 +173,7 @@ def create_application() -> FastAPI:
     app.include_router(developers_router, prefix=settings.API_V1_PREFIX)
     app.include_router(keys_router, prefix=settings.API_V1_PREFIX)
     app.include_router(models_router, prefix=settings.API_V1_PREFIX)
+    app.include_router(nlp_router, prefix=settings.API_V1_PREFIX)
     app.include_router(usage_router, prefix=settings.API_V1_PREFIX)
     app.include_router(protected_router, prefix=settings.API_V1_PREFIX)
 

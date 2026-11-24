@@ -44,7 +44,15 @@ async def register_developer(
     api_key, raw_key = await key_service.create_key(
         developer_id=developer.id,
         name="Default API Key",
-        scopes=["analyze:read", "sentiment:read", "ner:read", "classification:read"],
+        scopes=[
+            "analyze:read",
+            "sentiment:read",
+            "ner:read",
+            "classification:read",
+            "keys:read",
+            "keys:write",
+            "usage:read",
+        ],
     )
 
     data = {

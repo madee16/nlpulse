@@ -16,6 +16,16 @@ from src.schemas.model import (
     ModelStatusResponse,
     ModelUnloadResponse,
 )
+from src.schemas.nlp import (
+    EntityItem,
+    LabelScore,
+    NERRequest,
+    NERResponse,
+    SentimentRequest,
+    SentimentResponse,
+    ZeroShotRequest,
+    ZeroShotResponse,
+)
 from src.schemas.usage import UsageRecordResponse, UsageSummaryResponse
 
 __all__ = [
@@ -31,4 +41,12 @@ __all__ = [
     "ModelStatusResponse",
     "HardwareInfoResponse",
     "ModelUnloadResponse",
+    "SentimentRequest",
+    "SentimentResponse",
+    "NERRequest",
+    "NERResponse",
+    "EntityItem",
+    "ZeroShotRequest",
+    "ZeroShotResponse",
+    "LabelScore",
 ]
