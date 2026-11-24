@@ -31,6 +31,11 @@ from src.schemas.nlp import (
     ZeroShotRequest,
     ZeroShotResponse,
 )
+from src.schemas.extraction import (
+    ExtractionField,
+    ExtractionRequest,
+    ExtractionResponse,
+)
 from src.schemas.usage import UsageRecordResponse, UsageSummaryResponse
 
 __all__ = [
@@ -48,15 +53,18 @@ __all__ = [
     "ModelUnloadResponse",
     "SentimentRequest",
     "SentimentResponse",
+    "EntityItem",
     "NERRequest",
     "NERResponse",
-    "EntityItem",
+    "LabelScore",
     "ZeroShotRequest",
     "ZeroShotResponse",
-    "LabelScore",
     "KeywordItem",
     "KeywordRequest",
     "KeywordResponse",
     "SummarizationRequest",
     "SummarizationResponse",
+    "ExtractionField",
+    "ExtractionRequest",
+    "ExtractionResponse",
 ]

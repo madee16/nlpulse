@@ -119,3 +119,47 @@ class ModelInferenceError(ModelError):
         self.model_id = model_id
         self.reason = reason
 
+
+class OllamaError(NLPulseException):
+    """Base exception for local generative Ollama inference errors."""
+
+    def __init__(self, message: str = "Ollama generative service error.", status_code: int = 502) -> None:
+        super().__init__(message=message, status_code=status_code)
+
+
+class OllamaUnavailableError(OllamaError):
+    """Raised when the local Ollama daemon service cannot be reached (503 Service Unavailable)."""
+
+    def __init__(self, base_url: str = "http://localhost:11434") -> None:
+        super().__init__(
+            message=f"Local Ollama service unavailable at {base_url}. Ensure the Ollama daemon is running.",
+            status_code=503,
+        )
+        self.base_url = base_url
+
+
+class OllamaModelNotFoundError(OllamaError):
+    """Raised when the requested generative model is not found in local Ollama instance (404 Not Found)."""
+
+    def __init__(self, model_name: str) -> None:
+        super().__init__(
+            message=f"Generative model '{model_name}' not found in local Ollama service. Run 'ollama pull {model_name}'.",
+            status_code=404,
+        )
+        self.model_name = model_name
+
+
+class OllamaInferenceError(OllamaError):
+    """Raised when Ollama returns an error or generation fails (502 Bad Gateway)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(message=f"Generative inference failed: {reason}", status_code=502)
+        self.reason = reason
+
+
+class ExtractionValidationError(NLPulseException):
+    """Raised when generated extraction payload violates the user-specified schema (422 Unprocessable Entity)."""
+
+    def __init__(self, message: str, details: Optional[Any] = None) -> None:
+        super().__init__(message=message, status_code=422, details=details)
+

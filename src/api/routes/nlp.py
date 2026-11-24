@@ -9,11 +9,13 @@ from src.api.deps import (
     get_current_api_key,
     get_current_developer,
     get_model_registry,
+    get_ollama_client,
     require_scopes,
 )
 from src.db.session import get_db
 from src.models.api_key import APIKey
 from src.models.developer import Developer
+from src.schemas.extraction import ExtractionRequest, ExtractionResponse
 from src.schemas.nlp import (
     EntityItem,
     KeywordRequest,
@@ -27,10 +29,12 @@ from src.schemas.nlp import (
     ZeroShotRequest,
     ZeroShotResponse,
 )
+from src.services.extraction_service import ExtractionService
 from src.services.model_registry import ModelRegistry
 from src.services.nlp_service import NLPService
+from src.services.ollama_client import OllamaClient
 
-router = APIRouter(prefix="/nlp", tags=["Core NLP (M4)"])
+router = APIRouter(prefix="/nlp", tags=["NLP Pipelines (M4-M6)"])
 
 
 @router.post(
@@ -180,3 +184,40 @@ async def summarize_text(
         api_key_id=current_key.id,
     )
     return SummarizationResponse(**result)
+
+
+@router.post(
+    "/extraction",
+    response_model=ExtractionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Extract grounded structured information via local LLM (M6)",
+    description=(
+        "Extracts structured JSON adhering to a user-provided schema using a local generative model. "
+        "Strictly enforces factual grounding without hallucinations, populating unstated fields with null."
+    ),
+    dependencies=[
+        Depends(require_scopes("extraction:read", "generate:read", "nlp:read", "analyze:read", "admin")),
+        Depends(check_rate_limit),
+        Depends(check_quota),
+    ],
+)
+async def extract_information(
+    payload: ExtractionRequest,
+    current_key: APIKey = Depends(get_current_api_key),
+    developer: Developer = Depends(get_current_developer),
+    db: AsyncSession = Depends(get_db),
+    ollama_client: OllamaClient = Depends(get_ollama_client),
+) -> ExtractionResponse:
+    """Extract structured, schema-compliant JSON data from source text using local generative model."""
+    service = ExtractionService(session=db, ollama_client=ollama_client)
+    result = await service.extract_structured_data(
+        text=payload.text,
+        developer_id=developer.id,
+        schema_definition=payload.schema_definition,
+        fields=payload.fields,
+        instructions=payload.instructions,
+        model=payload.model,
+        temperature=payload.temperature,
+        api_key_id=current_key.id,
+    )
+    return ExtractionResponse(**result)

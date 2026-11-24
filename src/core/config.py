@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     KEYWORD_MAX_CANDIDATES: int = 100
     SUMMARIZATION_CHUNK_SIZE: int = 1800
 
+    # Generative NLP & Local LLM (M6)
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "qwen2.5:3b"
+    OLLAMA_TIMEOUT_SECONDS: float = 60.0
+    OLLAMA_MAX_INPUT_LENGTH: int = 15000
+    EXTRACTION_COST_PER_1K_TOKENS: int = 5
+
     # CORS
     CORS_ORIGINS: Union[List[str], str] = ["*"]
 

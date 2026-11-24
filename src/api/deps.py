@@ -19,6 +19,7 @@ from src.models.developer import Developer
 from src.services.api_key_service import APIKeyService
 from src.services.developer_service import DeveloperService
 from src.services.model_registry import ModelRegistry, model_registry
+from src.services.ollama_client import OllamaClient
 from src.services.usage_service import UsageService
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -89,4 +90,11 @@ def get_model_registry(request: Request) -> ModelRegistry:
     if hasattr(request.app.state, "model_registry") and request.app.state.model_registry:
         return request.app.state.model_registry
     return model_registry
+
+
+def get_ollama_client(request: Request) -> OllamaClient:
+    """Provide the application-scoped OllamaClient instance from state or fallback to default."""
+    if hasattr(request.app.state, "ollama_client") and request.app.state.ollama_client:
+        return request.app.state.ollama_client
+    return OllamaClient()
 
