@@ -37,7 +37,8 @@ NLPulse separates **deterministic local Transformer/embedding pipelines** (requi
 
 | Layer | Technologies Used | Role in NLPulse |
 | :--- | :--- | :--- |
-| **API & Validation** | Python 3.12, FastAPI, Uvicorn, Pydantic v2, Pydantic Settings, `email-validator` | Asynchronous REST routing, OpenAPI generation, security headers/CORS middleware, strict request/response & env validation |
+| **API & Validation** | Python 3.12, FastAPI, Uvicorn, Pydantic v2, Pydantic Settings, `email-validator`, `jsonschema` | Asynchronous REST routing, OpenAPI generation, security headers/CORS middleware, strict request/response, Draft 2020-12 extraction schema & env validation |
+| **Local Playground *(Optional)*** | React 19, Vite, TypeScript | Developer-facing local UI for health, model inspection, and single-request capability testing (`frontend/`) |
 | **Persistence & Migrations** | PostgreSQL 16, SQLAlchemy 2.x (async), `asyncpg`, Alembic, Docker Compose | Async ORM sessions (`pool_pre_ping`), tenant/key/usage schema with check constraints, cascade/audit foreign keys, reproducible schema migrations |
 | **Traditional & Embedding NLP** | PyTorch, Hugging Face `transformers`, NumPy | Lazy-loaded sequence/token classification, NLI zero-shot scoring, mean-pooled dense sentence embeddings, seq2seq summarization |
 | **Generative Extraction** | `httpx` (`AsyncClient`), Ollama *(optional)* | Decoupled HTTP transport to local LLM daemon (`POST /api/generate`) with timeout and error classification |
@@ -82,6 +83,7 @@ For full sequence diagrams, database constraints, and architectural tradeoffs, s
 | `src/services/` | Domain services (`NLPService`, `BatchService`, `ExtractionService`, `ModelRegistry`, `UsageService`, `APIKeyService`, `DeveloperService`, `OllamaClient`) |
 | `migrations/` | Async Alembic environment (`env.py`) and schema revision history (`1687e8d000b1_initial_schema.py`) |
 | `tests/` | Unit suites, HTTP/SQLite integration suites, security regressions, opt-in PostgreSQL 16 integration (`test_postgres_real.py`), and opt-in HF smoke tests (`test_real_models_smoke.py`) |
+| `frontend/` | Optional React + Vite + TypeScript local NLP playground (`sessionStorage` API key, zero mocked inference) |
 | `docs/` | Deep system architecture, ADRs (`001`–`007`), technical interview guide, and portfolio overview |
 
 ---
@@ -146,6 +148,43 @@ If Ollama is not running, all other NLP, batch, auth, and model routes continue 
 
 ---
 
+## Local Frontend / Playground
+
+An optional lightweight developer interface lives in `frontend/` (`React 19 + Vite + TypeScript`) for testing the real FastAPI backend interactively without modifying API contracts.
+
+### Run Locally
+
+1. Start PostgreSQL and the backend with Vite's local origin allowed (already included in `.env.example` `CORS_ORIGINS`):
+
+```bash
+alembic upgrade head
+uvicorn src.main:app --host 0.0.0.0 --port 8000
+```
+
+2. In a second terminal, start the Vite development server:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+3. Open `http://localhost:5173`, confirm backend health in the header bar, paste an `X-API-Key` issued by `POST /api/v1/developers`, and run requests across all six NLP capabilities or inspect `/api/v1/models`, `/api/v1/usage/summary`, and `/api/v1/hardware` (requires `admin` scope).
+
+- **Session-only key storage:** `X-API-Key` is kept strictly in browser `sessionStorage` and cleared immediately via **Clear Key** (never persisted to `localStorage` or logged).
+- **Real backend responses:** Every structured panel and Raw JSON view displays actual HTTP responses, `Retry-After` headers, and error details directly from FastAPI without mocked outputs.
+
+### Frontend Verification Commands
+
+```bash
+cd frontend
+npm run typecheck
+npm test
+npm run build
+```
+
+---
+
 ## Configuration Reference
 
 Settings are defined in `src/core/config.py` and templated in `.env.example`:
@@ -190,6 +229,9 @@ Settings are defined in `src/core/config.py` and templated in `.env.example`:
 | `BATCH_MAX_CONCURRENCY` | Max concurrent worker coroutines per batch | No | `4` | No |
 | `BATCH_INFERENCE_CHUNK_SIZE` | Micro-batch size for batched Transformer passes | No | `8` | No |
 | `BATCH_EXTRACTION_CONCURRENCY` | Max concurrent Ollama workers per batch | No | `2` | No |
+| `REGISTRATION_RATE_LIMIT_REQUESTS` | Max public `POST /api/v1/developers` attempts per window per IP | No | `5` | No |
+| `REGISTRATION_RATE_LIMIT_WINDOW_SECONDS` | Sliding window duration in seconds for registration admission limit | No | `60` | No |
+| `TRUSTED_PROXY_IPS` | Explicit proxy IPs/CIDRs permitted to supply right-most `X-Forwarded-For` | No | `[]` | No |
 | `NLPULSE_TEST_POSTGRES_URL` | Test-only env var enabling `pytest -m postgres` | No | Unset | **Yes** |
 | `RUN_REAL_MODEL_SMOKE` | Test-only flag (`1`) enabling `pytest -m smoke` | No | Unset | No |
 
@@ -461,9 +503,11 @@ Response (`200 OK`):
 ## Authentication, Security & Deployment Boundary
 
 - **API Key Lifecycle:** `POST /api/v1/developers` issues a `nlp_live_...` secret returned once (`32` URL-safe bytes). Only a 16-character prefix and SHA-256 hex digest live in `api_keys`. Child keys (`POST /api/v1/keys`) require explicit non-empty scopes (`min_length=1`) capped to a subset of the caller's scopes; public registration always enforces `tier="free"` (`1000` quota) without `admin`.
+- **Public Registration Admission Control:** `POST /api/v1/developers` applies process-local per-IP sliding-window rate limiting (`REGISTRATION_RATE_LIMIT_REQUESTS=5` per `60s`, returning `429` + `Retry-After` before any DB write). Direct peer IP (`request.client.host`) is enforced unless it matches configured `TRUSTED_PROXY_IPS` (in which case right-most untrusted `X-Forwarded-For` traversal prevents client spoofing). This does **not** provide distributed multi-node abuse protection.
+- **Structured Extraction Validation & Redaction:** Caller `schema_definition` payloads validate pre- and post-inference against **JSON Schema Draft 2020-12** (`jsonschema.Draft202012Validator` with built-in `FormatChecker` for `date`, `time`, `email`, `idn-email`, `idn-hostname`, `ipv4`, `ipv6`, `regex`, `uuid`). Missing `required` fields, invalid primitive types, bounds/pattern/format/enum violations raise `422` without inventing defaults (`fields` mode compiles nullable `[type, "null"]` types). Malformed/invalid LLM output and document content are never included in application logs or validation error details.
 - **Legacy Scope Compatibility:** Granular scopes (`sentiment:read`, `ner:read`, `classification:read`, `keywords:read`, `summarization:read`, `extraction:read`) coexist with `nlp:read`, `analyze:read`, `generate:read` (extraction), `models:read`, `keys:read`, `keys:write`, `usage:read`, `admin`, and `*`.
 - **Rate Limiting & Atomic Quota:** `SlidingWindowRateLimiter` allows `60` requests per `60` seconds per `api_key.key_hash` (`64` lock stripes, `429` + `Retry-After`). Monthly quotas reserve units up front (`reserve_single_quota` or `BatchService`) and release atomically upon database settlement (or via `asyncio.shield` cleanup).
-- **Single-Worker Deployment Boundary:** Both `SlidingWindowRateLimiter` and `QuotaReservationManager` store state in **process memory**. Running single-worker `uvicorn src.main:app` guarantees accurate limits and zero PostgreSQL deadlocks; multi-worker Uvicorn (`--workers > 1`) is **not supported** without adding an external shared state backend (see [ADR-007](docs/adr/007-single-worker-deployment-boundary.md)).
+- **Single-Worker Deployment Boundary:** `rate_limiter`, `registration_rate_limiter`, and `QuotaReservationManager` store state in **process memory**. Running single-worker `uvicorn src.main:app` enforces configured limits with zero PostgreSQL deadlocks; multi-worker deployment (`--workers > 1`) is **not supported** without an external shared state store (see [ADR-007](docs/adr/007-single-worker-deployment-boundary.md)).
 
 ---
 
@@ -489,9 +533,10 @@ NLPulse explicitly separates fast offline tests (SQLite `aiosqlite` + mocked Hug
 
 | Test Tier | Command | Prerequisites | What It Proves |
 | :--- | :--- | :--- | :--- |
-| **Default Offline Suite** | `pytest -v` | None (uses `aiosqlite` and mocks) | API routing, schemas, auth/scopes, rate limits, quota races, LRU eviction, batch partial failures, security headers (`-m "not smoke"` default in `pyproject.toml`) |
-| **Real PostgreSQL 16 Suite** | `NLPULSE_TEST_POSTGRES_URL="postgresql+asyncpg://user:pass@localhost:5432/db" pytest -m postgres -v` | Running PostgreSQL 16 DB migrated to Alembic head | PostgreSQL 16 `CHECK` constraints, rollbacks, `CASCADE` / `SET NULL`, and deadlock-free concurrent batch + single requests |
+| **Default Offline Suite** | `pytest -v` | None (uses `aiosqlite` and mocks) | API routing, schemas, registration admission control, JSON Schema extraction & redaction, quotas, LRU eviction, batch partial failures (`-m "not smoke"` default in `pyproject.toml`) |
+| **Real PostgreSQL 16 Suite** | `NLPULSE_TEST_POSTGRES_URL="postgresql+asyncpg://user:pass@localhost:5432/nlpulse_test" pytest -m postgres -v` | Running disposable PostgreSQL 16 DB (`_test` / `test_` suffix required) | Reproducible Alembic `upgrade head`, `alembic check`, `downgrade base` reset, `CHECK` constraints, `CASCADE` / `SET NULL`, and concurrent batch + single locking |
 | **Live HF Smoke Suite** | `RUN_REAL_MODEL_SMOKE=1 pytest -m smoke -v` | Internet access + HF model download cache | End-to-end weight downloads and real CPU/CUDA forward passes for Sentiment, NER, and Zero-Shot |
+| **Frontend Playground Suite** | `cd frontend && npm test && npm run typecheck && npm run build` | Node.js / npm | API transport, `sessionStorage` key isolation, capability tab & error rendering, TypeScript compilation, Vite production bundle |
 
 *(Default `pytest` skips `@pytest.mark.postgres` unless `NLPULSE_TEST_POSTGRES_URL` is exported and deselects `@pytest.mark.smoke`.)*
 
@@ -509,9 +554,10 @@ NLPulse explicitly separates fast offline tests (SQLite `aiosqlite` + mocked Hug
 ## Limitations & Future Improvements
 
 Current verified limitations:
-1. **Single-Worker Coordination:** Rate limiting (`SlidingWindowRateLimiter`) and in-flight quota tracking (`QuotaReservationManager`) are process-local (`--workers > 1` unsupported).
+1. **Single-Worker Coordination:** API-key rate limiting (`rate_limiter`), public registration rate limiting (`registration_rate_limiter`), and in-flight quota tracking (`QuotaReservationManager`) are process-local (`--workers > 1` unsupported and not distributed abuse protection).
 2. **Unverified Physical CUDA Execution:** While `DeviceManager` implements CUDA checks and OOM cleanup (tested via mocks), `.venv` carries CPU-only PyTorch, leaving real GPU kernel execution unverified.
-3. **Optional External Services:** Live Hugging Face inference (`-m smoke`), live Ollama extraction calls, and running PostgreSQL inside Docker Desktop remain optional/environment-dependent (PostgreSQL 16 concurrency was verified natively via WSL PostgreSQL 16.15).
-4. **Reserved Config Flag:** `MODEL_ENABLE_WARMUP` exists in `Settings` / `.env.example` as a reserved flag and does not currently preload models at startup.
+3. **Optional External Services:** Live Hugging Face inference (`-m smoke`), end-to-end Ollama text generation (probing local Ollama returned `404` because `qwen2.5:3b` was not pulled), and running PostgreSQL inside Docker Desktop remain optional/environment-dependent (PostgreSQL 16 migrations and concurrency were verified natively via WSL PostgreSQL 16.15).
+4. **JSON Schema Format Scope:** Built-in `jsonschema.FormatChecker()` validates `date`, `time`, `email`, `idn-email`, `idn-hostname`, `ipv4`, `ipv6`, `regex`, and `uuid` without external format validator plugins (`date-time`/`uri` format extras not bundled).
+5. **Reserved Config Flag:** `MODEL_ENABLE_WARMUP` exists in `Settings` / `.env.example` as a reserved flag and does not currently preload models at startup.
 
 Potential future enhancements (not yet implemented): Redis-backed distributed rate limiting and quota leases for horizontal scaling, GPU-stage CI smoke execution, `/ready` warmup lifecycle support, and asynchronous queued batch jobs (`202 Accepted`) for large document workloads.

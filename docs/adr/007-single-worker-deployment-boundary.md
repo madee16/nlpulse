@@ -4,7 +4,7 @@
 
 ## Context
 
-Both `SlidingWindowRateLimiter` (`src/core/rate_limiter.py`) and `QuotaReservationManager` (`src/services/usage_service.py`), along with `ModelRegistry` (`src/services/model_registry.py`), store state in process-local Python memory guarded by striped `asyncio.Lock` primitives. When evaluating multi-worker Uvicorn (`--workers > 1`) during readiness verification, spawning N independent OS worker processes causes N uncoordinated copies of rate-limit counters, N independent reservation trackers, and N duplicate copies of heavy PyTorch model caches competing for the same host RAM / 6 GB VRAM.
+Both `SlidingWindowRateLimiter` instances (`rate_limiter` and `registration_rate_limiter` in `src/core/rate_limiter.py`) and `QuotaReservationManager` (`src/services/usage_service.py`), along with `ModelRegistry` (`src/services/model_registry.py`), store state in process-local Python memory guarded by striped `asyncio.Lock` primitives. When evaluating multi-worker Uvicorn (`--workers > 1`), spawning N independent OS worker processes causes N uncoordinated copies of API-key and registration rate-limit counters, N independent reservation trackers, and N duplicate copies of heavy PyTorch model caches competing for the same host RAM / 6 GB VRAM.
 
 ## Decision
 

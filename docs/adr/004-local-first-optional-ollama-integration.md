@@ -9,8 +9,8 @@ NLPulse exposes structured JSON information extraction powered by a generative i
 ## Decision
 
 Decouple generative LLM execution behind an asynchronous HTTP client (`OllamaClient` in `src/services/ollama_client.py` using `httpx.AsyncClient`) targeting a local optional Ollama daemon (`OLLAMA_BASE_URL=http://localhost:11434`, default model `qwen2.5:3b`):
-- Enforce JSON-mode output (`format="json"`, `stream=False`), recursive schema validation (`_validate_schema_node`), Markdown fence stripping, strict placeholder normalization (`_is_placeholder_string`), and factual grounding prompts in `ExtractionService` (`src/services/extraction_service.py`).
-- Classify Ollama transport/status failures distinctly into `503 OllamaUnavailableError`, `404 OllamaModelNotFoundError`, `504 OllamaTimeoutError`, `502 OllamaInferenceError` (response snippet truncated to `300` chars), and `422 ExtractionValidationError`.
+- Enforce JSON-mode output (`format="json"`, `stream=False`), pre-inference and post-sanitization **JSON Schema Draft 2020-12** validation (`jsonschema.Draft202012Validator` + built-in `FormatChecker`) for `schema_definition`, nullable field compilation for simplified `fields`, Markdown fence stripping, strict placeholder normalization (`_is_placeholder_string`), and factual grounding prompts in `ExtractionService` (`src/services/extraction_service.py`).
+- Classify Ollama transport/status failures distinctly into `503 OllamaUnavailableError`, `404 OllamaModelNotFoundError`, `504 OllamaTimeoutError`, `502 OllamaInferenceError`, and `422 ExtractionValidationError` without logging or exposing raw LLM output or source PII in logs or error details.
 - Omit Ollama from mandatory startup checks and default pytest execution; verify via mocked `httpx` transports.
 
 ## Alternatives Considered
