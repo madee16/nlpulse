@@ -10,7 +10,7 @@
 
 ---
 
-## Current Status: M1–M7 Complete ✅
+## Current Status: M1–M8 Complete ✅
 
 - ✅ **M1: Foundations & Database** — Project structure, PostgreSQL 16, async SQLAlchemy 2.x session lifecycle, models (`Developer`, `APIKey`, `UsageRecord`), and Alembic async migrations.
 - ✅ **M2: Security & Authentication** — API keys, SHA-256 constant-time hashing, scope enforcement, sliding window rate limiting, monthly database quotas, and tenant isolation.
@@ -19,7 +19,8 @@
 - ✅ **M5: Advanced NLP** — Dense embedding keyword and keyphrase extraction (`sentence-transformers/all-MiniLM-L6-v2` with cosine similarity ranking and customizable n-gram / stopword filtering) and abstractive document summarization (`sshleifer/distilbart-cnn-12-6` with token-bounded sentence chunking and hierarchical consolidation). Fully integrated with LRU cache eviction, scopes (`keywords:read`, `summarization:read`), rate limits, quotas, and atomic usage metering.
 - ✅ **M6: Generative NLP** — Local LLM integration via asynchronous `OllamaClient`, structured information extraction (`POST /api/v1/nlp/extraction`) adhering to JSON Schema or field specifications, programmatic schema validation with null fallbacks for unstated fields, strict factual grounding, configurable instruct models (e.g. `qwen2.5:3b`, `llama3.2:3b`), and transparent token-based cost unit metering.
 - ✅ **M7: Batch Processing** — Multi-item REST endpoints across all 6 NLP capabilities (`/api/v1/nlp/batch/*`) featuring micro-batched tensor inference, cross-document deduplicated embedding batching, bounded concurrent worker pools, partial-failure isolation with stable ordering, atomic quota reservation, and accurate per-item + aggregate metering.
-- ⏳ **M8: Integration & Verification** — Next: End-to-end system verification and security testing.
+- ✅ **M8: Integration & Verification** — Cross-milestone integration audit, security hardening (strict empty-scope rejection, `/keys` & `/usage` scopes, atomic single-request quota reservation, safe `503`/`500` handling, zero-shot input bounds, `:path` routing for slashed HF model IDs), PostgreSQL 16.15 AB-BA deadlock elimination, and regression/reliability verification.
+- ⏳ **M9: Documentation & Portfolio** — Next: Portfolio architecture documentation, ADRs, and final presentation.
 
 ---
 
@@ -118,9 +119,11 @@
     │   ├── test_batch_api.py  # M7 batch API integration & quota race tests
     │   ├── test_extraction_api.py # M6 structured extraction API tests
     │   ├── test_m5_nlp_api.py # Keywords and summarization API tests
+    │   ├── test_m8_security_and_reliability.py # M8 security, validation & reliability tests
     │   ├── test_migrations.py # Alembic upgrade/downgrade integration tests
     │   ├── test_models_api.py # Model registry and hardware telemetry API tests
-    │   └── test_nlp_api.py    # Core NLP (sentiment, ner, classification) API tests
+    │   ├── test_nlp_api.py    # Core NLP (sentiment, ner, classification) API tests
+    │   └── test_postgres_real.py # Opt-in PostgreSQL 16 concurrency & constraint tests
     ├── smoke/
     │   ├── __init__.py
     │   └── test_real_models_smoke.py # Opt-in live Hugging Face smoke tests
@@ -155,7 +158,7 @@
 
 ---
 
-## API Endpoints (Milestones 1–7)
+## API Endpoints (Milestones 1–8)
 
 | Method | Endpoint | Auth Required | Scopes | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -163,10 +166,10 @@
 | `GET` | `/api/v1/health` | No | - | Service health check |
 | `POST` | `/api/v1/developers` | No | - | Register developer (enforces free tier & returns bootstrap API key) |
 | `GET` | `/api/v1/developers/me` | `X-API-Key` | - | View authenticated developer profile & quota |
-| `POST` | `/api/v1/keys` | `X-API-Key` | - | Create a child API key (scopes must be subset of caller's key) |
-| `GET` | `/api/v1/keys` | `X-API-Key` | - | List all API keys for tenant |
-| `DELETE` | `/api/v1/keys/{key_id}` | `X-API-Key` | - | Revoke an API key |
-| `GET` | `/api/v1/usage/summary` | `X-API-Key` | `usage:read` | Monthly quota consumption & remaining requests |
+| `POST` | `/api/v1/keys` | `X-API-Key` | `keys:write` / `admin` | Create a child API key (non-empty scopes subset of caller's key) |
+| `GET` | `/api/v1/keys` | `X-API-Key` | `keys:read` / `keys:write` / `admin` | List all API keys for tenant |
+| `DELETE` | `/api/v1/keys/{key_id}` | `X-API-Key` | `keys:write` / `admin` | Revoke an API key |
+| `GET` | `/api/v1/usage/summary` | `X-API-Key` | `usage:read` / `admin` | Monthly quota consumption & remaining requests |
 | `POST` | `/api/v1/nlp/sentiment` | `X-API-Key` | `sentiment:read` | DistilBERT sentiment analysis & confidence distribution |
 | `POST` | `/api/v1/nlp/ner` | `X-API-Key` | `ner:read` | BERT named entity recognition with character span offsets |
 | `POST` | `/api/v1/nlp/classification` | `X-API-Key` | `classification:read` | DistilBART zero-shot classification (single or multi-label) |
@@ -180,13 +183,11 @@
 | `POST` | `/api/v1/nlp/batch/summarization` | `X-API-Key` | `summarization:read` | Bounded concurrent hierarchical summarization batch (M7) |
 | `POST` | `/api/v1/nlp/batch/extraction` | `X-API-Key` | `extraction:read` | Bounded concurrent Ollama structured extraction batch (M7) |
 | `GET` | `/api/v1/models` | `X-API-Key` | `models:read` / `admin` | List registered models and operational status |
-| `GET` | `/api/v1/models/{model_id}` | `X-API-Key` | `models:read` / `admin` | Retrieve model telemetry and loading state |
-| `POST` | `/api/v1/models/{model_id}/unload` | `X-API-Key` | `admin` | Explicitly unload model and release GPU/RAM |
+| `GET` | `/api/v1/models/{model_id:path}` | `X-API-Key` | `models:read` / `admin` | Retrieve model telemetry and loading state (supports HF `org/model` IDs) |
+| `POST` | `/api/v1/models/{model_id:path}/unload` | `X-API-Key` | `admin` | Explicitly unload model and release GPU/RAM |
 | `GET` | `/api/v1/hardware` | `X-API-Key` | `admin` | Inspect compute hardware, GPU availability, and VRAM |
 
 > **Scope Compatibility:** All `/api/v1/nlp/*` and `/api/v1/nlp/batch/*` endpoints also accept `nlp:read`, `analyze:read` (legacy compatibility), and `admin`. Extraction endpoints also accept `generate:read`.
-
----
 
 ---
 
@@ -333,7 +334,7 @@ Response (`200 OK`, preserving exact item order and `id`):
 
 ### 4. Failure Semantics, Atomic Quota Reservation & Metering
 - **Envelope vs. Item Validation:** Empty (`items: []`) or oversized (`len(items) > BATCH_MAX_SIZE`) requests fail with HTTP `422`. Invalid individual items (blank text, invalid parameter ranges, malformed per-item extraction output, or upstream Ollama errors) fail safely inside `results[i].error` without invalidating healthy items.
-- **Atomic Quota Reservation:** `UsageService.reserve_quota` serializes per-tenant reservation checks (`QuotaReservationManager` + `SELECT ... FOR UPDATE`), rejecting batches with HTTP `429` before inference if `committed + reserved + executable_items > monthly_request_quota`. Concurrent batches cannot race past quota limits.
+- **Atomic Quota Reservation:** `UsageService.reserve_quota` serializes per-tenant reservation checks for both single requests (`reserve_single_quota`) and batches using `QuotaReservationManager` without holding long-lived PostgreSQL row locks across slow inference, preventing both concurrent TOCTOU quota overruns and PostgreSQL AB-BA deadlocks. Committed usage records atomically settle and release reservations under the same developer lock.
 - **Accurate Usage Settlement:** Only items with `status == "success"` generate persisted `UsageRecord` rows (`endpoint="/api/v1/nlp/batch/<capability>"`) and contribute to `total_cost_units`. Failed or cancelled items incur zero quota consumption and zero cost units, and reservations are always released in `finally` blocks even on `asyncio.CancelledError`.
 
 ---
@@ -395,11 +396,22 @@ Run the offline unit and integration test suite with Pytest (smoke tests requiri
 pytest -v
 ```
 
+To opt into real PostgreSQL 16 integration tests (`@pytest.mark.postgres`):
+
+```bash
+NLPULSE_TEST_POSTGRES_URL="postgresql+asyncpg://user:password@localhost:5432/db" pytest -m postgres -v
+```
+
 To opt into live Hugging Face model smoke tests (requires internet access and model downloads):
 
 ```bash
 RUN_REAL_MODEL_SMOKE=1 pytest -m smoke -v
 ```
+
+### Deployment & Verification Scope (M8)
+
+- **Single-Worker Coordination Boundary:** `SlidingWindowRateLimiter` (`src/core/rate_limiter.py`) and `QuotaReservationManager` (`src/services/usage_service.py`) store synchronization state in process memory. Single-worker `uvicorn src.main:app` execution enforces strict sliding-window rate limits and atomic deadlock-free quota reservations; multi-worker deployment (`--workers > 1`) requires adding an external shared state backend.
+- **Verification Environment Notes:** Alembic migrations, constraints, cascades, and concurrent HTTP batch + single request flows were verified against real PostgreSQL 16.15 (WSL) and SQLite offline fixtures; live Hugging Face downloads, local CUDA kernel execution (CPU-only PyTorch installed in the development environment), and a live Ollama daemon remain optional/unverified runtime targets outside the standard offline suite.
 
 ---
 
@@ -414,5 +426,5 @@ RUN_REAL_MODEL_SMOKE=1 pytest -m smoke -v
 | **M5** | Advanced NLP | Keyword extraction, summarization | ✅ Complete |
 | **M6** | Generative NLP | Ollama integration, structured information extraction | ✅ Complete |
 | **M7** | Batch Processing | Micro-batched inference, bounded worker pools, quota reservation, partial failures | ✅ Complete |
-| **M8** | Integration & Verification | API integration, end-to-end tests, security verification | ⏳ Next |
-| **M9** | Documentation & Portfolio | README, architecture docs, ADRs, interview preparation, final release | 📋 Planned |
+| **M8** | Integration & Verification | API integration, end-to-end tests, security & PostgreSQL verification | ✅ Complete |
+| **M9** | Documentation & Portfolio | README, architecture docs, ADRs, interview preparation, final release | ⏳ Next |

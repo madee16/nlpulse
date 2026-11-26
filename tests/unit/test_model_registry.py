@@ -305,3 +305,30 @@ async def test_unload_model_and_unload_all(registry: ModelRegistry):
     await registry.unload_all()
     assert registry.get_loaded_count() == 0
     assert inst2.unload_count == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_loading_beyond_cache_limit_respects_max_cached():
+    """Verify concurrent get_model calls cannot exceed max_cached_models while weights load simultaneously."""
+    reg = ModelRegistry(device_mgr=DeviceManager(preference="cpu"), max_cached_models=2)
+    m1_meta = create_meta("m1")
+    m2_meta = create_meta("m2")
+    m3_meta = create_meta("m3")
+
+    reg.register(m1_meta, lambda: MockModel(m1_meta, load_delay=0.1))
+    reg.register(m2_meta, lambda: MockModel(m2_meta, load_delay=0.1))
+    reg.register(m3_meta, lambda: MockModel(m3_meta, load_delay=0.1))
+
+    results = await asyncio.gather(
+        reg.get_model("m1"),
+        reg.get_model("m2"),
+        reg.get_model("m3"),
+        return_exceptions=True,
+    )
+    loaded = [r for r in results if not isinstance(r, Exception)]
+    errors = [r for r in results if isinstance(r, Exception)]
+
+    assert reg.get_loaded_count() <= 2
+    assert len(loaded) == 2
+    assert len(errors) == 1
+    assert isinstance(errors[0], ModelResourceError)

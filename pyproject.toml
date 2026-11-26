@@ -52,6 +52,7 @@ pythonpath = ["."]
 addopts = "-v --tb=short -m 'not smoke'"
 markers = [
     "smoke: opt-in real model smoke tests requiring live internet and model downloads",
+    "postgres: opt-in real PostgreSQL 16 integration tests requiring NLPULSE_TEST_POSTGRES_URL",
 ]
 
 [tool.setuptools.packages.find]
