@@ -211,3 +211,148 @@ async def test_extraction_service_empty_text_raises_validation_error(mock_sessio
             developer_id=dev_id,
             fields=[ExtractionField(name="entity")],
         )
+
+
+@pytest.mark.asyncio
+async def test_extraction_preserves_legitimate_none_unknown_na_present_in_source(mock_session, mock_ollama_client):
+    """Verify legitimate 'none', 'unknown', and 'N/A' values stated in source text are preserved for string fields."""
+    mock_ollama_client.generate.return_value = {
+        "response": '{"auth_mode": "none", "vendor": "Unknown", "middle_initial": "N/A", "missing_note": "N/A"}',
+        "prompt_tokens": 60,
+        "completion_tokens": 20,
+        "total_tokens": 80,
+        "total_duration_ns": 100000000,
+        "model": "qwen2.5:3b",
+    }
+
+    service = ExtractionService(session=mock_session, ollama_client=mock_ollama_client)
+    dev_id = uuid.uuid4()
+
+    fields = [
+        ExtractionField(name="auth_mode", type="string"),
+        ExtractionField(name="vendor", type="string"),
+        ExtractionField(name="middle_initial", type="string"),
+        ExtractionField(name="missing_note", type="string", required=False),
+    ]
+
+    result = await service.extract_structured_data(
+        text="Auth mode is none and vendor is Unknown.",
+        developer_id=dev_id,
+        fields=fields,
+    )
+
+    data = result["extracted_data"]
+    assert data["auth_mode"] == "none"
+    assert data["vendor"] == "Unknown"
+    # "N/A" does NOT appear in source_text so it is treated as a placeholder and converted to None
+    assert data["middle_initial"] is None
+    assert data["missing_note"] is None
+
+
+@pytest.mark.asyncio
+async def test_extraction_nested_schema_and_union_types(mock_session, mock_ollama_client):
+    """Verify nested object/array schemas, union types, bool-vs-int guard, and additionalProperties=False."""
+    mock_ollama_client.generate.return_value = {
+        "response": json.dumps({
+            "company": {
+                "name": "Acme Corp",
+                "employees": True,
+                "founded_year": 1998.0,
+                "headquarters": {"city": "Austin", "postal_code": "N/A"},
+            },
+            "executives": [
+                {"name": "Jane Doe", "tenure_years": "7", "active": "false"},
+                {"name": "John Smith", "tenure_years": "unknown", "active": "invalid"},
+            ],
+            "tags": ["enterprise", "N/A", "saas"],
+            "nullable_count": "1,250",
+            "fabricated_extra": "should_be_dropped",
+        }),
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "total_duration_ns": 200000000,
+        "model": "qwen2.5:3b",
+    }
+
+    service = ExtractionService(session=mock_session, ollama_client=mock_ollama_client)
+    dev_id = uuid.uuid4()
+
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "company": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string"},
+                    "employees": {"type": "integer"},
+                    "founded_year": {"type": "integer"},
+                    "headquarters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "postal_code": {"type": "string"},
+                        },
+                    },
+                },
+            },
+            "executives": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "tenure_years": {"type": "integer"},
+                        "active": {"type": "boolean"},
+                    },
+                },
+            },
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "nullable_count": {"type": ["integer", "null"]},
+        },
+    }
+
+    result = await service.extract_structured_data(
+        text="Acme Corp was founded in 1998 in Austin. Jane Doe served 7 years.",
+        developer_id=dev_id,
+        schema_definition=schema,
+    )
+
+    data = result["extracted_data"]
+    assert "fabricated_extra" not in data
+    assert data["company"]["name"] == "Acme Corp"
+    # bool True must NOT coerce to integer 1
+    assert data["company"]["employees"] is None
+    assert data["company"]["founded_year"] == 1998
+    assert isinstance(data["company"]["founded_year"], int)
+    assert data["company"]["headquarters"]["city"] == "Austin"
+    assert data["company"]["headquarters"]["postal_code"] is None
+    assert data["executives"][0] == {"name": "Jane Doe", "tenure_years": 7, "active": False}
+    assert data["executives"][1] == {"name": "John Smith", "tenure_years": None, "active": None}
+    assert data["tags"] == ["enterprise", "saas"]
+    assert data["nullable_count"] == 1250
+
+
+@pytest.mark.asyncio
+async def test_extraction_rejects_malformed_schema_definition(mock_session, mock_ollama_client):
+    """Verify invalid schema_definition raises ExtractionValidationError before calling Ollama."""
+    service = ExtractionService(session=mock_session, ollama_client=mock_ollama_client)
+    dev_id = uuid.uuid4()
+
+    with pytest.raises(ExtractionValidationError):
+        await service.extract_structured_data(
+            text="Valid text",
+            developer_id=dev_id,
+            schema_definition={"type": "object", "properties": ["not-a-dict"]},
+        )
+
+    with pytest.raises(ExtractionValidationError):
+        await service.extract_structured_data(
+            text="Valid text",
+            developer_id=dev_id,
+            schema_definition={"type": "string"},
+        )
+
+    mock_ollama_client.generate.assert_not_called()

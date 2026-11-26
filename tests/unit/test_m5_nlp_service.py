@@ -265,3 +265,46 @@ async def test_keyword_extraction_deterministic_tie_breaking(mock_session, m5_te
     kw_names = [k["keyword"] for k in result["keywords"]]
     # Should be sorted alphabetically because all scores are identical
     assert kw_names == sorted(kw_names)
+
+
+@pytest.mark.asyncio
+async def test_summarize_multi_round_recursive_consolidation_terminates(mock_session, monkeypatch):
+    """Verify multi-round hierarchical summarization shrinks across rounds and terminates reliably even if summaries expand."""
+    monkeypatch.setattr(settings, "SUMMARIZATION_CHUNK_SIZE", 120)
+
+    # Case 1: Very long doc requiring > 2 consolidation rounds
+    reg1 = ModelRegistry()
+    sum_meta1 = ModelMetadata(model_id=settings.MODEL_SUMMARIZATION_ID, name="Shrinking Sum", task="summarization")
+    call_inputs1 = []
+
+    def shrinking_pipe(text: str, **kwargs):
+        call_inputs1.append(text)
+        return [{"summary_text": f"Summary segment {len(call_inputs1)} capturing core highlights."}]
+
+    reg1.register(sum_meta1, lambda: SummarizationModel(sum_meta1, pipeline_factory=lambda: shrinking_pipe))
+    service1 = NLPService(session=mock_session, registry=reg1)
+
+    long_text = " ".join(f"Sentence number {i} contains detailed analytical context." for i in range(120))
+    res1 = await service1.summarize_text(text=long_text, developer_id=uuid.uuid4(), min_length=10, max_length=60)
+    assert res1["chunks_processed"] > 25
+    # Verify final call received a consolidated summary within chunk limit
+    assert len(call_inputs1[-1]) <= 120
+
+    # Case 2: Pathological expanding summarizer must terminate via progress guard instead of infinite loop
+    reg2 = ModelRegistry()
+    sum_meta2 = ModelMetadata(model_id=settings.MODEL_SUMMARIZATION_ID, name="Expanding Sum", task="summarization")
+    calls2 = 0
+
+    def expanding_pipe(text: str, **kwargs):
+        nonlocal calls2
+        calls2 += 1
+        return [{"summary_text": "Expanded output sentence. " * 6}]  # ~150 chars > 120 chunk size
+
+    reg2.register(sum_meta2, lambda: SummarizationModel(sum_meta2, pipeline_factory=lambda: expanding_pipe))
+    service2 = NLPService(session=mock_session, registry=reg2)
+
+    three_chunks = " ".join(f"Sentence {i} is roughly fifty characters long yes." for i in range(8))
+    res2 = await service2.summarize_text(text=three_chunks, developer_id=uuid.uuid4(), min_length=10, max_length=60)
+    assert res2["summary"]
+    # Terminates cleanly without looping endlessly
+    assert calls2 <= 25

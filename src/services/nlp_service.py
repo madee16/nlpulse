@@ -315,8 +315,13 @@ class NLPService:
         model = await self.registry.get_model(model_id)
 
         start = time.perf_counter()
-        # Chunk text if document exceeds chunk size
-        chunks = chunk_text_by_sentences(clean_text, chunk_size=settings.SUMMARIZATION_CHUNK_SIZE)
+        tokenizer = getattr(getattr(model, "_pipeline", None), "tokenizer", None)
+        # Chunk text if document exceeds chunk size or token threshold
+        chunks = chunk_text_by_sentences(
+            clean_text,
+            chunk_size=settings.SUMMARIZATION_CHUNK_SIZE,
+            tokenizer=tokenizer,
+        )
 
         if len(chunks) == 1:
             # Single-pass summarization
@@ -329,43 +334,55 @@ class NLPService:
             })
             final_summary = res["summary_text"]
         else:
-            # Multi-chunk processing and hierarchical consolidation pass
-            chunk_summaries = []
+            # Bounded hierarchical consolidation loop with strict shrinkage & iteration cap
             chunk_max_len = max(min_length, min(max_length, 80))
             chunk_min_len = min(min_length, 20)
+            max_consolidation_rounds = 5
 
-            for chunk in chunks:
-                chunk_res = await model.predict({
-                    "text": chunk,
-                    "min_length": chunk_min_len,
-                    "max_length": chunk_max_len,
-                    "do_sample": do_sample,
-                    "temperature": temperature,
-                })
-                chunk_summaries.append(chunk_res["summary_text"])
+            current_text = clean_text
+            current_chunks = chunks
 
-            consolidated_input = " ".join(chunk_summaries)
-            # Guard against consolidated text exceeding chunk limit
-            if len(consolidated_input) > settings.SUMMARIZATION_CHUNK_SIZE:
-                sub_chunks = chunk_text_by_sentences(
-                    consolidated_input,
-                    chunk_size=settings.SUMMARIZATION_CHUNK_SIZE,
-                )
-                sub_summaries = []
-                for sc in sub_chunks:
-                    sc_res = await model.predict({
-                        "text": sc,
+            for _ in range(max_consolidation_rounds):
+                if len(current_chunks) <= 1:
+                    break
+
+                round_summaries = []
+                for chunk in current_chunks:
+                    chunk_res = await model.predict({
+                        "text": chunk,
                         "min_length": chunk_min_len,
                         "max_length": chunk_max_len,
                         "do_sample": do_sample,
                         "temperature": temperature,
                     })
-                    sub_summaries.append(sc_res["summary_text"])
-                consolidated_input = " ".join(sub_summaries)
+                    summary_part = chunk_res["summary_text"].strip()
+                    if summary_part:
+                        round_summaries.append(summary_part)
 
-            # Final consolidation pass guaranteed to fit model input token limit
+                consolidated_input = " ".join(round_summaries).strip()
+                if not consolidated_input:
+                    break
+
+                next_chunks = chunk_text_by_sentences(
+                    consolidated_input,
+                    chunk_size=settings.SUMMARIZATION_CHUNK_SIZE,
+                    tokenizer=tokenizer,
+                )
+
+                # Stop once reduced to a single chunk, or if no strict progress was achieved
+                no_progress = (
+                    len(next_chunks) >= len(current_chunks)
+                    and len(consolidated_input) >= len(current_text)
+                )
+                current_text = consolidated_input
+                current_chunks = next_chunks
+                if len(current_chunks) <= 1 or no_progress:
+                    break
+
+            # Final consolidation pass (bounded if pathological input prevented full convergence)
+            final_input = current_text if len(current_chunks) <= 1 else current_chunks[0]
             final_res = await model.predict({
-                "text": consolidated_input,
+                "text": final_input,
                 "min_length": min_length,
                 "max_length": max_length,
                 "do_sample": do_sample,

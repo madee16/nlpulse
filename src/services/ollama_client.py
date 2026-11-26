@@ -11,6 +11,7 @@ from src.core.config import get_settings
 from src.core.exceptions import (
     OllamaInferenceError,
     OllamaModelNotFoundError,
+    OllamaTimeoutError,
     OllamaUnavailableError,
 )
 from src.core.logging import get_logger
@@ -75,7 +76,7 @@ class OllamaClient:
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             raise OllamaUnavailableError(self.base_url) from exc
         except httpx.TimeoutException as exc:
-            raise OllamaInferenceError(f"Ollama list_models timed out after {self.timeout}s.") from exc
+            raise OllamaTimeoutError(f"Ollama list_models timed out after {self.timeout}s.") from exc
         except Exception as exc:
             raise OllamaInferenceError(f"Unexpected error communicating with Ollama: {exc}") from exc
 
@@ -110,7 +111,8 @@ class OllamaClient:
         Raises:
             OllamaUnavailableError: When local Ollama service is not running or unreachable.
             OllamaModelNotFoundError: When the specified model is not downloaded in Ollama.
-            OllamaInferenceError: When generation fails or times out.
+            OllamaTimeoutError: When generation times out waiting on upstream Ollama.
+            OllamaInferenceError: When generation fails or returns an invalid payload.
         """
         target_model = model or settings.OLLAMA_MODEL
         req_timeout = timeout or self.timeout
@@ -152,7 +154,7 @@ class OllamaClient:
             raise OllamaUnavailableError(self.base_url) from exc
         except httpx.TimeoutException as exc:
             logger.warning(f"Ollama generation timed out after {req_timeout}s for model '{target_model}'")
-            raise OllamaInferenceError(f"Ollama generation timed out after {req_timeout}s.") from exc
+            raise OllamaTimeoutError(f"Ollama generation timed out after {req_timeout}s.") from exc
         except Exception as exc:
             logger.error(f"Unexpected error communicating with Ollama: {exc}")
             raise OllamaInferenceError(f"Unexpected error communicating with Ollama: {exc}") from exc

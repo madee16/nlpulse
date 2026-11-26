@@ -200,7 +200,8 @@ NLPulse integrates local generative LLMs via an asynchronous HTTP client communi
 - **Resilient Error Classification:** Custom exception hierarchy mapping service states:
   - `503 Service Unavailable`: Local Ollama daemon unreachable or not running.
   - `404 Not Found`: Model tag not downloaded in Ollama (`ollama pull <model>`).
-  - `502 Bad Gateway`: Upstream Ollama timeout or generation failure.
+  - `504 Gateway Timeout`: Upstream Ollama request timed out before completing generation.
+  - `502 Bad Gateway`: Upstream Ollama generation failure or malformed response.
   - `422 Unprocessable Entity`: Model output violates user-provided JSON schema.
 
 ### 2. Schema-Grounded Information Extraction

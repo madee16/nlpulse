@@ -7,6 +7,7 @@ import pytest
 from src.core.exceptions import (
     OllamaInferenceError,
     OllamaModelNotFoundError,
+    OllamaTimeoutError,
     OllamaUnavailableError,
 )
 from src.services.ollama_client import OllamaClient
@@ -100,15 +101,28 @@ async def test_ollama_model_not_found(mock_httpx_client):
 
 @pytest.mark.asyncio
 async def test_ollama_timeout(mock_httpx_client):
-    """Verify OllamaInferenceError raised when inference exceeds timeout."""
+    """Verify OllamaTimeoutError (504) raised when inference exceeds timeout."""
     mock_httpx_client.post = AsyncMock(side_effect=httpx.TimeoutException("Read timed out"))
 
     client = OllamaClient(http_client=mock_httpx_client)
-    with pytest.raises(OllamaInferenceError) as exc_info:
+    with pytest.raises(OllamaTimeoutError) as exc_info:
         await client.generate(prompt="Test prompt")
 
-    assert exc_info.value.status_code == 502
+    assert isinstance(exc_info.value, OllamaInferenceError)
+    assert exc_info.value.status_code == 504
     assert "timed out" in exc_info.value.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_ollama_connect_timeout_raises_unavailable_503(mock_httpx_client):
+    """Verify ConnectTimeout maps to OllamaUnavailableError (503) rather than 504."""
+    mock_httpx_client.post = AsyncMock(side_effect=httpx.ConnectTimeout("Connect timed out"))
+
+    client = OllamaClient(http_client=mock_httpx_client)
+    with pytest.raises(OllamaUnavailableError) as exc_info:
+        await client.generate(prompt="Test prompt")
+
+    assert exc_info.value.status_code == 503
 
 
 @pytest.mark.asyncio

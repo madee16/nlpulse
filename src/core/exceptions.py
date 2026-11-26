@@ -152,9 +152,16 @@ class OllamaModelNotFoundError(OllamaError):
 class OllamaInferenceError(OllamaError):
     """Raised when Ollama returns an error or generation fails (502 Bad Gateway)."""
 
-    def __init__(self, reason: str) -> None:
-        super().__init__(message=f"Generative inference failed: {reason}", status_code=502)
+    def __init__(self, reason: str, status_code: int = 502) -> None:
+        super().__init__(message=f"Generative inference failed: {reason}", status_code=status_code)
         self.reason = reason
+
+
+class OllamaTimeoutError(OllamaInferenceError):
+    """Raised when an upstream Ollama request exceeds its timeout (504 Gateway Timeout)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason=reason, status_code=504)
 
 
 class ExtractionValidationError(NLPulseException):

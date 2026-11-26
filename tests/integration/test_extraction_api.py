@@ -8,7 +8,9 @@ from sqlalchemy import select
 
 from src.core.config import get_settings
 from src.core.exceptions import (
+    OllamaInferenceError,
     OllamaModelNotFoundError,
+    OllamaTimeoutError,
     OllamaUnavailableError,
 )
 from src.core.rate_limiter import rate_limiter
@@ -212,3 +214,32 @@ async def test_extraction_api_missing_schema_and_fields_422(async_client: AsyncC
         json={"text": "Sample text"},
     )
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_extraction_api_ollama_timeout_504(async_client: AsyncClient, registered_dev_headers: tuple):
+    """Verify 504 Gateway Timeout returned when Ollama upstream generation times out."""
+    headers, _ = registered_dev_headers
+    app.state.ollama_client.generate.side_effect = OllamaTimeoutError("Ollama generation timed out after 60.0s.")
+
+    response = await async_client.post(
+        "/api/v1/nlp/extraction",
+        headers=headers,
+        json={"text": "Sample text", "fields": [{"name": "item"}]},
+    )
+    assert response.status_code == 504
+    assert "timed out" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_extraction_api_ollama_error_502(async_client: AsyncClient, registered_dev_headers: tuple):
+    """Verify 502 Bad Gateway returned when Ollama returns non-timeout upstream failure."""
+    headers, _ = registered_dev_headers
+    app.state.ollama_client.generate.side_effect = OllamaInferenceError("Ollama returned HTTP 500")
+
+    response = await async_client.post(
+        "/api/v1/nlp/extraction",
+        headers=headers,
+        json={"text": "Sample text", "fields": [{"name": "item"}]},
+    )
+    assert response.status_code == 502

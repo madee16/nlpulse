@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+_ALLOWED_FIELD_TYPES = frozenset({"string", "number", "integer", "boolean", "array", "object"})
 
 
 class ExtractionField(BaseModel):
@@ -23,6 +26,24 @@ class ExtractionField(BaseModel):
         default=True,
         description="Whether this field must be present in output JSON (defaults to null if not found in text)",
     )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name_non_blank(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Field name cannot be empty or whitespace.")
+        return cleaned
+
+    @field_validator("type")
+    @classmethod
+    def validate_field_type(cls, v: str) -> str:
+        normalized = v.strip().lower()
+        if normalized not in _ALLOWED_FIELD_TYPES:
+            raise ValueError(
+                f"Unsupported field type '{v}'. Allowed types: {sorted(_ALLOWED_FIELD_TYPES)}."
+            )
+        return normalized
 
 
 class ExtractionRequest(BaseModel):
