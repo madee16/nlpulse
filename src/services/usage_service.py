@@ -71,7 +71,7 @@ class UsageService:
         input_character_count: int = 0,
         cost_units: int = 1,
     ) -> UsageRecord:
-        """Log an API invocation."""
+        """Log an API invocation atomically under the developer quota lock."""
         record = UsageRecord(
             developer_id=developer_id,
             api_key_id=api_key_id,
@@ -82,9 +82,18 @@ class UsageService:
             latency_ms=max(0.0, latency_ms),
             cost_units=max(0, cost_units),
         )
-        self.session.add(record)
-        await self.session.commit()
-        await self.session.refresh(record)
+        async with quota_reservation_manager.get_lock(developer_id):
+            self.session.add(record)
+            await self.session.commit()
+            await self.session.refresh(record)
+            session_info = getattr(self.session, "info", None)
+            reservations = session_info.get("_quota_reservations") if isinstance(session_info, dict) else None
+            if isinstance(reservations, dict) and reservations.get(developer_id, 0) > 0:
+                to_release = min(reservations[developer_id], max(1, record.cost_units))
+                reservations[developer_id] -= to_release
+                if reservations[developer_id] <= 0:
+                    reservations.pop(developer_id, None)
+                quota_reservation_manager.release_sync(developer_id, to_release)
         return record
 
     async def get_monthly_usage_count(self, developer_id: uuid.UUID) -> int:
@@ -122,63 +131,60 @@ class UsageService:
         )
 
     async def assert_within_quota(self, developer: Developer) -> None:
-        """Atomically ensure developer has not exceeded their monthly request limit.
+        """Ensure developer has not exceeded their monthly request limit.
 
-        Acquires an exclusive row lock on the Developer record (SELECT ... FOR UPDATE)
-        and inspects in-flight batch reservations to serialize concurrent checks.
+        Serializes checks against the process-local QuotaReservationManager lock
+        without holding long-lived PostgreSQL row locks across ML/LLM inference.
 
         Raises:
             QuotaExceededError: If the quota has been reached or exceeded.
         """
         async with quota_reservation_manager.get_lock(developer.id):
-            stmt = (
-                select(Developer)
-                .where(Developer.id == developer.id)
-                .with_for_update()
-            )
+            stmt = select(Developer).where(Developer.id == developer.id)
             result = await self.session.execute(stmt)
-            locked_dev = result.scalar_one_or_none() or developer
+            current_dev = result.scalar_one_or_none() or developer
 
-            used = await self.get_monthly_usage_count(locked_dev.id)
-            reserved = quota_reservation_manager.get_reserved(locked_dev.id)
-            if used + reserved >= locked_dev.monthly_request_quota:
+            used = await self.get_monthly_usage_count(current_dev.id)
+            reserved = quota_reservation_manager.get_reserved(current_dev.id)
+            if used + reserved >= current_dev.monthly_request_quota:
                 raise QuotaExceededError(
-                    f"Monthly request quota of {locked_dev.monthly_request_quota} requests exhausted. "
+                    f"Monthly request quota of {current_dev.monthly_request_quota} requests exhausted. "
                     "Please upgrade your tier to continue sending requests."
                 )
 
     async def reserve_quota(self, developer: Developer, units: int) -> None:
-        """Atomically reserve quota units for an in-flight batch execution.
+        """Atomically reserve quota units for an in-flight request or batch execution.
 
-        Prevents concurrent batches from exceeding monthly_request_quota via TOCTOU races
-        while keeping database locks short-lived.
+        Prevents concurrent requests from exceeding monthly_request_quota via TOCTOU races
+        in a single-node deployment without holding PostgreSQL locks across inference.
         """
         if units <= 0:
             await self.assert_within_quota(developer)
             return
 
         async with quota_reservation_manager.get_lock(developer.id):
-            stmt = (
-                select(Developer)
-                .where(Developer.id == developer.id)
-                .with_for_update()
-            )
+            stmt = select(Developer).where(Developer.id == developer.id)
             result = await self.session.execute(stmt)
-            locked_dev = result.scalar_one_or_none() or developer
+            current_dev = result.scalar_one_or_none() or developer
 
-            used = await self.get_monthly_usage_count(locked_dev.id)
-            reserved = quota_reservation_manager.get_reserved(locked_dev.id)
+            used = await self.get_monthly_usage_count(current_dev.id)
+            reserved = quota_reservation_manager.get_reserved(current_dev.id)
             effective_used = used + reserved
-            remaining = max(0, locked_dev.monthly_request_quota - effective_used)
+            remaining = max(0, current_dev.monthly_request_quota - effective_used)
 
-            if effective_used >= locked_dev.monthly_request_quota or units > remaining:
+            if effective_used >= current_dev.monthly_request_quota or units > remaining:
+                if units == 1:
+                    raise QuotaExceededError(
+                        f"Monthly request quota of {current_dev.monthly_request_quota} requests exhausted. "
+                        "Please upgrade your tier to continue sending requests."
+                    )
                 raise QuotaExceededError(
                     f"Insufficient monthly quota remaining ({remaining} available out of "
-                    f"{locked_dev.monthly_request_quota}, batch requires {units}). "
+                    f"{current_dev.monthly_request_quota}, batch requires {units}). "
                     "Please reduce batch size or upgrade your tier."
                 )
 
-            quota_reservation_manager.add_reserved(locked_dev.id, units)
+            quota_reservation_manager.add_reserved(current_dev.id, units)
 
     async def settle_batch_usage(
         self,

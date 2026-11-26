@@ -31,6 +31,13 @@ class APIKeyService:
             Tuple[APIKey, str]: (persisted_api_key, raw_secret_key)
                 - raw_secret_key: Returned once for display; NEVER stored in DB.
         """
+        if scopes is None:
+            resolved_scopes = ["analyze:read"]
+        else:
+            resolved_scopes = [s.strip() for s in scopes if isinstance(s, str) and s.strip()]
+            if not resolved_scopes:
+                raise ValueError("API key must specify at least one valid non-empty scope.")
+
         raw_key, key_prefix, key_hash = generate_api_key(prefix="nlp_live")
 
         expires_at = None
@@ -42,7 +49,7 @@ class APIKeyService:
             key_hash=key_hash,
             key_prefix=key_prefix,
             name=name.strip(),
-            scopes=scopes or ["analyze:read"],
+            scopes=resolved_scopes,
             expires_at=expires_at,
         )
         self.session.add(api_key)

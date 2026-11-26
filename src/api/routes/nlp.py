@@ -4,13 +4,13 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import (
-    check_quota,
     check_rate_limit,
     get_current_api_key,
     get_current_developer,
     get_model_registry,
     get_ollama_client,
     require_scopes,
+    reserve_single_quota,
 )
 from src.db.session import get_db
 from src.models.api_key import APIKey
@@ -45,7 +45,7 @@ router = APIRouter(prefix="/nlp", tags=["NLP Pipelines (M4-M6)"])
     dependencies=[
         Depends(require_scopes("sentiment:read", "nlp:read", "analyze:read", "admin")),
         Depends(check_rate_limit),
-        Depends(check_quota),
+        Depends(reserve_single_quota),
     ],
 )
 async def analyze_sentiment(
@@ -73,7 +73,7 @@ async def analyze_sentiment(
     dependencies=[
         Depends(require_scopes("ner:read", "nlp:read", "analyze:read", "admin")),
         Depends(check_rate_limit),
-        Depends(check_quota),
+        Depends(reserve_single_quota),
     ],
 )
 async def extract_entities(
@@ -101,7 +101,7 @@ async def extract_entities(
     dependencies=[
         Depends(require_scopes("classification:read", "nlp:read", "analyze:read", "admin")),
         Depends(check_rate_limit),
-        Depends(check_quota),
+        Depends(reserve_single_quota),
     ],
 )
 async def classify_zero_shot(
@@ -131,7 +131,7 @@ async def classify_zero_shot(
     dependencies=[
         Depends(require_scopes("keywords:read", "nlp:read", "analyze:read", "admin")),
         Depends(check_rate_limit),
-        Depends(check_quota),
+        Depends(reserve_single_quota),
     ],
 )
 async def extract_keywords(
@@ -162,7 +162,7 @@ async def extract_keywords(
     dependencies=[
         Depends(require_scopes("summarization:read", "nlp:read", "analyze:read", "admin")),
         Depends(check_rate_limit),
-        Depends(check_quota),
+        Depends(reserve_single_quota),
     ],
 )
 async def summarize_text(
@@ -198,7 +198,7 @@ async def summarize_text(
     dependencies=[
         Depends(require_scopes("extraction:read", "generate:read", "nlp:read", "analyze:read", "admin")),
         Depends(check_rate_limit),
-        Depends(check_quota),
+        Depends(reserve_single_quota),
     ],
 )
 async def extract_information(

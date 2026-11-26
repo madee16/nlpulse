@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import List, Optional
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class APIKeyCreate(BaseModel):
@@ -13,6 +13,7 @@ class APIKeyCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="Friendly label for the API key")
     scopes: List[str] = Field(
         default=["analyze:read"],
+        min_length=1,
         description="Permission scopes granted to this key (e.g. sentiment:read, ner:read, admin)",
     )
     expires_in_days: Optional[int] = Field(
@@ -21,6 +22,22 @@ class APIKeyCreate(BaseModel):
         le=365,
         description="Optional expiration window in days (null for non-expiring keys)",
     )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name_non_blank(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("API key name cannot be empty or whitespace.")
+        return cleaned
+
+    @field_validator("scopes")
+    @classmethod
+    def validate_scopes_non_empty(cls, v: List[str]) -> List[str]:
+        cleaned = [s.strip() for s in v if isinstance(s, str) and s.strip()]
+        if not cleaned:
+            raise ValueError("API key must specify at least one non-empty scope.")
+        return cleaned
 
 
 class APIKeyResponse(BaseModel):

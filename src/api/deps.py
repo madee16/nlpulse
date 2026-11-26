@@ -1,5 +1,6 @@
 """FastAPI dependencies for database access, authentication, scopes, and quota enforcement."""
 
+import asyncio
 from typing import AsyncGenerator, List, Optional
 
 from fastapi import Depends, Header, HTTPException, Request, Security
@@ -74,6 +75,32 @@ async def check_quota(
     """Evaluate whether the developer has exceeded their monthly request quota."""
     usage_service = UsageService(db)
     await usage_service.assert_within_quota(developer)
+
+
+async def reserve_single_quota(
+    developer: Developer = Depends(get_current_developer),
+    db: AsyncSession = Depends(get_db),
+) -> AsyncGenerator[None, None]:
+    """Reserve 1 quota unit across single-item inference to eliminate concurrent TOCTOU races."""
+    usage_service = UsageService(db)
+    await usage_service.reserve_quota(developer, units=1)
+    session_info = getattr(db, "info", None)
+    reservations = session_info.setdefault("_quota_reservations", {}) if isinstance(session_info, dict) else None
+    if isinstance(reservations, dict):
+        reservations[developer.id] = reservations.get(developer.id, 0) + 1
+    try:
+        yield
+    finally:
+        if isinstance(reservations, dict):
+            remaining = reservations.get(developer.id, 0)
+            if remaining > 0:
+                release_units = 1
+                reservations[developer.id] = remaining - release_units
+                if reservations[developer.id] <= 0:
+                    reservations.pop(developer.id, None)
+                await asyncio.shield(usage_service.release_reservation(developer.id, units=release_units))
+        else:
+            await asyncio.shield(usage_service.release_reservation(developer.id, units=1))
 
 
 async def check_rate_limit(

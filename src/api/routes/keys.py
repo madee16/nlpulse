@@ -6,7 +6,7 @@ import uuid
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import get_current_api_key, get_current_developer, get_db
+from src.api.deps import get_current_api_key, get_current_developer, get_db, require_scopes
 from src.core.exceptions import PermissionDeniedError
 from src.models.api_key import APIKey
 from src.models.developer import Developer
@@ -29,6 +29,7 @@ router = APIRouter(prefix="/keys", tags=["API Keys"])
         "Generates a new API key for the authenticated developer. Raw key returned ONLY once. "
         "Keys can only be granted a subset of the scopes held by the authorizing API key."
     ),
+    dependencies=[Depends(require_scopes("keys:write", "admin"))],
 )
 async def create_key(
     payload: APIKeyCreate,
@@ -82,6 +83,7 @@ async def create_key(
     response_model=List[APIKeyResponse],
     summary="List API keys",
     description="Lists all API keys belonging to the authenticated developer (secrets are never returned).",
+    dependencies=[Depends(require_scopes("keys:read", "keys:write", "admin"))],
 )
 async def list_keys(
     developer: Developer = Depends(get_current_developer),
@@ -98,6 +100,7 @@ async def list_keys(
     response_model=APIKeyResponse,
     summary="Revoke an API key",
     description="Deactivates an API key. Any future requests with this key will fail immediately.",
+    dependencies=[Depends(require_scopes("keys:write", "admin"))],
 )
 async def revoke_key(
     key_id: uuid.UUID,

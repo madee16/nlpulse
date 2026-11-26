@@ -56,6 +56,8 @@ class ModelRegistry:
         self._registrations: Dict[str, ModelRegistration] = {}
         self._loaded_models: Dict[str, BaseModel] = {}
         self._loading_locks: Dict[str, asyncio.Lock] = {}
+        self._pending_loads: set[str] = set()
+        self._evicting_models: set[str] = set()
         self._registry_lock = asyncio.Lock()
 
         logger.info(
@@ -160,7 +162,7 @@ class ModelRegistry:
                 if model.is_ready():
                     return model
 
-            # Evict least recently used model if cache is full
+            # Reserve a cache slot and evict LRU idle model if needed
             await self._ensure_cache_capacity(target_model_id=model_id)
 
             registration = self._registrations[model_id]
@@ -176,65 +178,85 @@ class ModelRegistry:
             model = registration.factory()
             try:
                 await model.load(device)
-                self._loaded_models[model_id] = model
+                async with self._registry_lock:
+                    self._loaded_models[model_id] = model
                 registration.last_error = None
                 return model
             except Exception as e:
                 registration.last_error = str(e)
-                if model_id in self._loaded_models:
-                    del self._loaded_models[model_id]
+                async with self._registry_lock:
+                    self._loaded_models.pop(model_id, None)
                 raise
+            finally:
+                async with self._registry_lock:
+                    self._pending_loads.discard(model_id)
 
     async def _ensure_cache_capacity(self, target_model_id: str) -> None:
-        """Evict the least recently used idle model if loaded model count reaches limit.
+        """Reserve a cache slot, evicting the least recently used idle model when full.
+
+        Accounts for concurrently loading models so parallel requests for distinct models
+        cannot exceed `max_cached_models`.
 
         Args:
             target_model_id: Model ID about to be loaded.
 
         Raises:
-            ModelResourceError: If cache is full and all loaded models are busy with inference.
+            ModelResourceError: If cache is full and all loaded/loading slots are occupied.
         """
-        async with self._registry_lock:
-            if len(self._loaded_models) < self.max_cached_models:
-                return
+        while True:
+            lru_model_id: Optional[str] = None
+            async with self._registry_lock:
+                if target_model_id in self._pending_loads:
+                    return
+                total_occupied = len(self._loaded_models) + len(self._pending_loads)
+                if total_occupied < self.max_cached_models:
+                    self._pending_loads.add(target_model_id)
+                    return
 
-            # Find candidates for eviction (must not be the target, must not be busy)
-            candidates: List[BaseModel] = [
-                m for m_id, m in self._loaded_models.items()
-                if m_id != target_model_id and not m.is_busy()
-            ]
+                # Find candidates for eviction (not target, not already evicting, not busy)
+                candidates: List[BaseModel] = [
+                    m for m_id, m in self._loaded_models.items()
+                    if m_id != target_model_id
+                    and m_id not in self._evicting_models
+                    and not m.is_busy()
+                ]
 
-            if not candidates:
-                logger.error(
-                    "Model cache full and all loaded models are actively executing inference",
+                if not candidates:
+                    logger.error(
+                        "Model cache full and all loaded/loading slots are actively occupied",
+                        extra={
+                            "loaded_count": len(self._loaded_models),
+                            "pending_loads": len(self._pending_loads),
+                            "max_cached": self.max_cached_models,
+                            "target_model_id": target_model_id,
+                        },
+                    )
+                    raise ModelResourceError(
+                        f"Model cache limit ({self.max_cached_models}) reached and all loaded models "
+                        "are currently executing active inference tasks. Cannot evict."
+                    )
+
+                candidates.sort(
+                    key=lambda m: m.last_used_at or datetime.min.replace(tzinfo=timezone.utc)
+                )
+                lru_model = candidates[0]
+                lru_model_id = lru_model.model_id
+                self._evicting_models.add(lru_model_id)
+                logger.info(
+                    f"Evicting LRU model '{lru_model_id}' from cache to free slot for '{target_model_id}'",
                     extra={
-                        "loaded_count": len(self._loaded_models),
-                        "max_cached": self.max_cached_models,
-                        "target_model_id": target_model_id,
+                        "evicted_model": lru_model_id,
+                        "target_model": target_model_id,
+                        "last_used_at": lru_model.last_used_at.isoformat() if lru_model.last_used_at else None,
                     },
                 )
-                raise ModelResourceError(
-                    f"Model cache limit ({self.max_cached_models}) reached and all loaded models "
-                    "are currently executing active inference tasks. Cannot evict."
-                )
 
-            # Sort by last_used_at ascending (LRU)
-            # If last_used_at is None, treat as oldest
-            candidates.sort(
-                key=lambda m: m.last_used_at or datetime.min.replace(tzinfo=timezone.utc)
-            )
-            lru_model = candidates[0]
-            logger.info(
-                f"Evicting LRU model '{lru_model.model_id}' from cache to free slot for '{target_model_id}'",
-                extra={
-                    "evicted_model": lru_model.model_id,
-                    "target_model": target_model_id,
-                    "last_used_at": lru_model.last_used_at.isoformat() if lru_model.last_used_at else None,
-                },
-            )
-
-        # Unload outside of _registry_lock to avoid blocking other registry queries
-        await self.unload_model(lru_model.model_id, force=False)
+            # Unload outside of _registry_lock to avoid blocking other registry queries
+            try:
+                await self.unload_model(lru_model_id, force=False)
+            finally:
+                async with self._registry_lock:
+                    self._evicting_models.discard(lru_model_id)
 
     async def unload_model(self, model_id: str, force: bool = False) -> None:
         """Unload a loaded model and release memory.

@@ -38,25 +38,8 @@ async def list_models(
     return [ModelStatusResponse(**item) for item in models_data]
 
 
-@router.get(
-    "/models/{model_id}",
-    response_model=ModelStatusResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Get status and telemetry for a specific model",
-    dependencies=[Depends(require_scopes("models:read", "analyze:read", "admin"))],
-)
-async def get_model_status(
-    model_id: str,
-    current_key: APIKey = Depends(get_current_api_key),
-    registry: ModelRegistry = Depends(get_model_registry),
-) -> ModelStatusResponse:
-    """Retrieve status, hosting device, inference counters, and error states for a single model."""
-    status_dict = registry.get_model_status(model_id)
-    return ModelStatusResponse(**status_dict)
-
-
 @router.post(
-    "/models/{model_id}/unload",
+    "/models/{model_id:path}/unload",
     response_model=ModelUnloadResponse,
     status_code=status.HTTP_200_OK,
     summary="Explicitly unload a model from memory (Admin only)",
@@ -75,6 +58,23 @@ async def unload_model(
         model_id=model_id,
         status="unloaded",
     )
+
+
+@router.get(
+    "/models/{model_id:path}",
+    response_model=ModelStatusResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get status and telemetry for a specific model",
+    dependencies=[Depends(require_scopes("models:read", "analyze:read", "admin"))],
+)
+async def get_model_status(
+    model_id: str,
+    current_key: APIKey = Depends(get_current_api_key),
+    registry: ModelRegistry = Depends(get_model_registry),
+) -> ModelStatusResponse:
+    """Retrieve status, hosting device, inference counters, and error states for a single model."""
+    status_dict = registry.get_model_status(model_id)
+    return ModelStatusResponse(**status_dict)
 
 
 @router.get(

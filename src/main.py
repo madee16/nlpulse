@@ -5,6 +5,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 
@@ -202,6 +203,22 @@ def create_application() -> FastAPI:
             status_code=exc.status_code,
             content={"detail": exc.message, "status_code": exc.status_code},
             headers=headers,
+        )
+
+    @app.exception_handler(SQLAlchemyError)
+    async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError) -> JSONResponse:
+        logger.error(f"Database operation failed: {type(exc).__name__}", exc_info=True)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Database service temporarily unavailable.", "status_code": 503},
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.error(f"Unhandled application error: {type(exc).__name__}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error.", "status_code": 500},
         )
 
     # Register API routers

@@ -72,12 +72,18 @@ class NLPService:
             if not isinstance(lbl, str) or not lbl.strip():
                 raise NLPValidationError("Candidate labels must be non-empty strings.")
             cleaned = lbl.strip()
+            if len(cleaned) > 200:
+                raise NLPValidationError("Candidate labels cannot exceed 200 characters each.")
             if cleaned not in seen:
                 seen.add(cleaned)
                 clean_labels.append(cleaned)
 
         if not clean_labels:
             raise NLPValidationError("candidate_labels must contain at least one valid non-empty string.")
+        if len(clean_labels) > 25:
+            raise NLPValidationError(
+                f"candidate_labels cannot exceed 25 unique labels (received {len(clean_labels)})."
+            )
         return clean_text, clean_labels
 
     def validate_keyword_inputs(
