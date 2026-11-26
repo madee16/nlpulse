@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     OLLAMA_MAX_INPUT_LENGTH: int = 15000
     EXTRACTION_COST_PER_1K_TOKENS: int = 5
 
+    # Batch Processing (M7)
+    BATCH_MAX_SIZE: int = 20
+    BATCH_MAX_CONCURRENCY: int = 4
+    BATCH_INFERENCE_CHUNK_SIZE: int = 8
+    BATCH_EXTRACTION_CONCURRENCY: int = 2
+
     # CORS
     CORS_ORIGINS: Union[List[str], str] = ["*"]
 

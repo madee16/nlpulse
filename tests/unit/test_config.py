@@ -48,3 +48,28 @@ def test_get_settings_caching():
     s1 = get_settings()
     s2 = get_settings()
     assert s1 is s2
+
+
+def test_batch_settings_defaults_and_overrides():
+    """Verify M7 batch processing configuration defaults and env overrides."""
+    default_settings = Settings()
+    assert default_settings.BATCH_MAX_SIZE == 20
+    assert default_settings.BATCH_MAX_CONCURRENCY == 4
+    assert default_settings.BATCH_INFERENCE_CHUNK_SIZE == 8
+    assert default_settings.BATCH_EXTRACTION_CONCURRENCY == 2
+
+    with patch.dict(
+        os.environ,
+        {
+            "BATCH_MAX_SIZE": "50",
+            "BATCH_MAX_CONCURRENCY": "6",
+            "BATCH_INFERENCE_CHUNK_SIZE": "16",
+            "BATCH_EXTRACTION_CONCURRENCY": "3",
+        },
+        clear=False,
+    ):
+        overridden = Settings()
+        assert overridden.BATCH_MAX_SIZE == 50
+        assert overridden.BATCH_MAX_CONCURRENCY == 6
+        assert overridden.BATCH_INFERENCE_CHUNK_SIZE == 16
+        assert overridden.BATCH_EXTRACTION_CONCURRENCY == 3

@@ -245,20 +245,19 @@ class BaseModel(ABC):
                     extra={"model_id": self.model_id},
                 )
 
-    async def predict(self, inputs: Any, **kwargs: Any) -> Any:
-        """Execute inference with concurrency guarding and async event-loop protection.
+    def _execute_batch_inference(self, inputs: Any, **kwargs: Any) -> Any:
+        """Synchronously perform batched inference across multiple items.
 
-        Args:
-            inputs: Text or structured payload for inference.
-            **kwargs: Extra parameters passed to the model inference method.
-
-        Returns:
-            Output from `_execute_inference`.
-
-        Raises:
-            ModelError: If the model is not in the READY state.
-            ModelInferenceError: If inference execution fails or times out.
+        Default implementation executes `_execute_inference` sequentially inside a single
+        worker slot. Subclasses whose underlying framework supports vectorized tensor
+        batching should override this method.
         """
+        if not isinstance(inputs, list):
+            raise ValueError(f"Expected list input for batch inference, got {type(inputs).__name__}")
+        return [self._execute_inference(item, **kwargs) for item in inputs]
+
+    async def _run_worker(self, fn: Any, inputs: Any, **kwargs: Any) -> Any:
+        """Execute a synchronous model callable under M3 semaphore and lifecycle guards."""
         if self._state != ModelState.READY:
             raise ModelError(
                 f"Cannot execute inference on model '{self.model_id}': state is {self._state.value}",
@@ -285,7 +284,7 @@ class BaseModel(ABC):
         # We ensure _active_inferences and _semaphore are released ONLY when the worker thread
         # actually completes, preventing model unload or concurrency overflow during timeout.
         worker_task = asyncio.ensure_future(
-            asyncio.to_thread(self._execute_inference, inputs, **kwargs)
+            asyncio.to_thread(fn, inputs, **kwargs)
         )
 
         slot_released = False
@@ -338,6 +337,33 @@ class BaseModel(ABC):
                 exc_info=True,
             )
             raise ModelInferenceError(self.model_id, err_msg) from e
+
+    async def predict(self, inputs: Any, **kwargs: Any) -> Any:
+        """Execute inference with concurrency guarding and async event-loop protection.
+
+        Args:
+            inputs: Text or structured payload for inference.
+            **kwargs: Extra parameters passed to the model inference method.
+
+        Returns:
+            Output from `_execute_inference`.
+
+        Raises:
+            ModelError: If the model is not in the READY state.
+            ModelInferenceError: If inference execution fails or times out.
+        """
+        return await self._run_worker(self._execute_inference, inputs, **kwargs)
+
+    async def predict_batch(self, inputs: Any, **kwargs: Any) -> Any:
+        """Execute batched inference preserving M3 concurrency, timeout, and OOM guards."""
+        if self._state != ModelState.READY:
+            raise ModelError(
+                f"Cannot execute inference on model '{self.model_id}': state is {self._state.value}",
+                status_code=503,
+            )
+        if isinstance(inputs, list) and not inputs:
+            return []
+        return await self._run_worker(self._execute_batch_inference, inputs, **kwargs)
 
     def to_dict(self) -> Dict[str, Any]:
         """Produce a comprehensive monitoring status dictionary."""

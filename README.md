@@ -10,7 +10,7 @@
 
 ---
 
-## Current Status: M1, M2, M3, M4, M5 & M6 Complete ✅
+## Current Status: M1–M7 Complete ✅
 
 - ✅ **M1: Foundations & Database** — Project structure, PostgreSQL 16, async SQLAlchemy 2.x session lifecycle, models (`Developer`, `APIKey`, `UsageRecord`), and Alembic async migrations.
 - ✅ **M2: Security & Authentication** — API keys, SHA-256 constant-time hashing, scope enforcement, sliding window rate limiting, monthly database quotas, and tenant isolation.
@@ -18,7 +18,8 @@
 - ✅ **M4: Core NLP** — Sentiment analysis (`distilbert-base-uncased-finetuned-sst-2-english`), Named Entity Recognition (`bert-base-NER` with subword BPE token aggregation), and Zero-Shot text classification (`distilbart-mnli-12-1` with single-label softmax & multi-label sigmoid scoring). Complete end-to-end API integration with rate limiting, monthly quota enforcement, and per-tenant usage metering.
 - ✅ **M5: Advanced NLP** — Dense embedding keyword and keyphrase extraction (`sentence-transformers/all-MiniLM-L6-v2` with cosine similarity ranking and customizable n-gram / stopword filtering) and abstractive document summarization (`sshleifer/distilbart-cnn-12-6` with token-bounded sentence chunking and hierarchical consolidation). Fully integrated with LRU cache eviction, scopes (`keywords:read`, `summarization:read`), rate limits, quotas, and atomic usage metering.
 - ✅ **M6: Generative NLP** — Local LLM integration via asynchronous `OllamaClient`, structured information extraction (`POST /api/v1/nlp/extraction`) adhering to JSON Schema or field specifications, programmatic schema validation with null fallbacks for unstated fields, strict factual grounding, configurable instruct models (e.g. `qwen2.5:3b`, `llama3.2:3b`), and transparent token-based cost unit metering.
-- ⏳ **M7: Batch Processing** — Next: Efficient multi-text inference and benchmarking.
+- ✅ **M7: Batch Processing** — Multi-item REST endpoints across all 6 NLP capabilities (`/api/v1/nlp/batch/*`) featuring micro-batched tensor inference, cross-document deduplicated embedding batching, bounded concurrent worker pools, partial-failure isolation with stable ordering, atomic quota reservation, and accurate per-item + aggregate metering.
+- ⏳ **M8: Integration & Verification** — Next: End-to-end system verification and security testing.
 
 ---
 
@@ -59,9 +60,12 @@
 │   │   ├── deps.py           # Dependencies (get_db, auth, scopes, quota, rate-limit)
 │   │   └── routes/
 │   │       ├── __init__.py
+│   │       ├── batch.py      # M7 batch NLP endpoints (/api/v1/nlp/batch/*)
 │   │       ├── developers.py # Developer registration & profile endpoints
 │   │       ├── health.py     # Health check endpoint (/api/v1/health)
 │   │       ├── keys.py       # API key issuance, listing, and revocation
+│   │       ├── models.py     # Model lifecycle & hardware telemetry routes
+│   │       ├── nlp.py        # M4-M6 NLP inference endpoints
 │   │       ├── protected.py  # Scope & quota protected verification routes
 │   │       └── usage.py      # Monthly quota summary endpoints
 │   ├── core/
@@ -89,6 +93,7 @@
 │   ├── schemas/
 │   │   ├── __init__.py
 │   │   ├── api_key.py        # API key request/response schemas
+│   │   ├── batch.py          # Batch request/response & partial-failure schemas (M7)
 │   │   ├── developer.py      # Developer registration/profile schemas
 │   │   ├── model.py          # Model telemetry & hardware metrics schemas
 │   │   ├── nlp.py            # NLP requests, responses, and entity schemas
@@ -97,25 +102,34 @@
 │   └── services/
 │       ├── __init__.py
 │       ├── api_key_service.py   # Key issuance, hashing, and auth
+│       ├── batch_service.py     # M7 batch orchestration, concurrency & metering
 │       ├── developer_service.py # Tenant management & quota assignment
 │       ├── extraction_service.py# Generative structured extraction service (M6)
 │       ├── model_registry.py    # Lazy loading, LRU caching, eviction & locks
 │       ├── nlp_service.py       # Core NLP orchestration & atomic usage metering
 │       ├── ollama_client.py     # Asynchronous local Ollama HTTP client (M6)
-│       └── usage_service.py     # Metering & calendar month quota checks
+│       └── usage_service.py     # Metering, quota reservation & monthly checks
 └── tests/
     ├── __init__.py
     ├── conftest.py           # Pytest fixtures (async client & in-memory test DB)
     ├── integration/
     │   ├── __init__.py
     │   ├── test_auth_api.py   # End-to-end API registration, auth, and scopes
+    │   ├── test_batch_api.py  # M7 batch API integration & quota race tests
     │   ├── test_extraction_api.py # M6 structured extraction API tests
     │   ├── test_m5_nlp_api.py # Keywords and summarization API tests
     │   ├── test_migrations.py # Alembic upgrade/downgrade integration tests
     │   ├── test_models_api.py # Model registry and hardware telemetry API tests
     │   └── test_nlp_api.py    # Core NLP (sentiment, ner, classification) API tests
+    ├── smoke/
+    │   ├── __init__.py
+    │   └── test_real_models_smoke.py # Opt-in live Hugging Face smoke tests
     └── unit/
         ├── __init__.py
+        ├── test_batch_models.py  # M7 model-level batch inference tests
+        ├── test_batch_quota.py   # M7 atomic quota reservation & settlement tests
+        ├── test_batch_schemas.py # M7 batch schema envelope & validation tests
+        ├── test_batch_service.py # M7 BatchService orchestration & cancellation tests
         ├── test_config.py     # Configuration tests
         ├── test_device.py     # Hardware detection & CUDA fallback tests
         ├── test_extraction_service.py # M6 extraction schema validation tests
@@ -141,7 +155,7 @@
 
 ---
 
-## API Endpoints (Milestones 1–6)
+## API Endpoints (Milestones 1–7)
 
 | Method | Endpoint | Auth Required | Scopes | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -159,10 +173,18 @@
 | `POST` | `/api/v1/nlp/keywords` | `X-API-Key` | `keywords:read` | MiniLM dense embedding keyword & keyphrase ranking |
 | `POST` | `/api/v1/nlp/summarization` | `X-API-Key` | `summarization:read` | DistilBART abstractive text summarization with chunking |
 | `POST` | `/api/v1/nlp/extraction` | `X-API-Key` | `extraction:read` | Local LLM grounded structured information extraction (M6) |
+| `POST` | `/api/v1/nlp/batch/sentiment` | `X-API-Key` | `sentiment:read` | Micro-batched sentiment analysis with partial-failure isolation (M7) |
+| `POST` | `/api/v1/nlp/batch/ner` | `X-API-Key` | `ner:read` | Micro-batched NER across multiple texts (M7) |
+| `POST` | `/api/v1/nlp/batch/classification` | `X-API-Key` | `classification:read` | Grouped batched zero-shot classification (M7) |
+| `POST` | `/api/v1/nlp/batch/keywords` | `X-API-Key` | `keywords:read` | Cross-document deduplicated embedding keyword batching (M7) |
+| `POST` | `/api/v1/nlp/batch/summarization` | `X-API-Key` | `summarization:read` | Bounded concurrent hierarchical summarization batch (M7) |
+| `POST` | `/api/v1/nlp/batch/extraction` | `X-API-Key` | `extraction:read` | Bounded concurrent Ollama structured extraction batch (M7) |
 | `GET` | `/api/v1/models` | `X-API-Key` | `models:read` / `admin` | List registered models and operational status |
 | `GET` | `/api/v1/models/{model_id}` | `X-API-Key` | `models:read` / `admin` | Retrieve model telemetry and loading state |
 | `POST` | `/api/v1/models/{model_id}/unload` | `X-API-Key` | `admin` | Explicitly unload model and release GPU/RAM |
 | `GET` | `/api/v1/hardware` | `X-API-Key` | `admin` | Inspect compute hardware, GPU availability, and VRAM |
+
+> **Scope Compatibility:** All `/api/v1/nlp/*` and `/api/v1/nlp/batch/*` endpoints also accept `nlp:read`, `analyze:read` (legacy compatibility), and `admin`. Extraction endpoints also accept `generate:read`.
 
 ---
 
@@ -179,7 +201,7 @@ NLPulse implements an embedding-based semantic keyword extractor inspired by Key
 
 ### 2. Abstractive Summarization & Long-Document Chunking
 1. **Sequence-to-Sequence Generation:** Leverages `sshleifer/distilbart-cnn-12-6` (~306M parameters, ~600 MB VRAM / ~1.2 GB RAM), fine-tuned on CNN/DailyMail for concise abstractive summarization.
-2. **Long-Document Strategy:** When input texts exceed the single-pass token limit (`SUMMARIZATION_CHUNK_SIZE=2500` characters), the document is split across sentence boundaries using `chunk_text_by_sentences`. Each chunk is summarized independently, followed by a consolidation pass across chunk summaries.
+2. **Long-Document Strategy:** When input texts exceed the single-pass chunk limit (`SUMMARIZATION_CHUNK_SIZE=1800` characters), the document is split across sentence boundaries using `chunk_text_by_sentences`. Each chunk is summarized independently, followed by a bounded hierarchical consolidation loop across chunk summaries.
 3. **Usage Attribution:** Metering tracks `cost_units` equal to the number of document chunks processed, ensuring fair billing attribution.
 
 ### 3. Hardware Requirements & Model Lifecycle
@@ -209,6 +231,110 @@ NLPulse integrates local generative LLMs via an asynchronous HTTP client communi
 - **Strict Anti-Hallucination Grounding:** System instructions enforce strict factual adherence to the source document. If a requested property is not explicitly stated or directly inferable, the model is instructed to output JSON `null`.
 - **Programmatic Post-Generation Validation:** Strips any markdown code block wrappers, parses raw JSON, validates expected property types (numbers, booleans, arrays), and normalizes placeholder strings (e.g. "N/A", "none", "unknown") to `null`.
 - **Transparent Token-Based Metering:** Cost units are calculated proportionally based on input prompt and generated completion tokens (`EXTRACTION_COST_PER_1K_TOKENS=5`), recording atomic usage records linked to the developer tenant.
+
+---
+
+## Batch Processing Architecture (Milestone 7)
+
+### 1. Execution Strategy: Tensor Batching vs. Bounded Concurrency
+NLPulse implements task-appropriate batching strategies tailored to 6 GB VRAM / 16 GB RAM resource limits and M3 `ModelRegistry` lifecycle safety:
+
+| Capability | `execution_mode` | Strategy |
+| :--- | :--- | :--- |
+| **Sentiment** | `batched_inference` | True micro-batched tensor forward passes (`SentimentModel.predict_batch`, chunked by `BATCH_INFERENCE_CHUNK_SIZE`) with single-item fallback to isolate failing inputs |
+| **NER** | `batched_inference` | Micro-batched token classification (`NERModel.predict_batch`) with subword aggregation and isolated fallback |
+| **Zero-Shot Classification** | `grouped_batched_inference` | Groups items sharing `(candidate_labels, multi_label)` into micro-batched NLI passes via `ZeroShotClassificationModel.predict_batch` |
+| **Keyword Extraction** | `deduplicated_batched_embeddings` | Extracts candidate n-grams per item, deduplicates all documents + candidates into a shared embedding pool, and encodes in bounded PyTorch tensor batches |
+| **Summarization** | `bounded_concurrent` | Fixed worker pool (`min(N, BATCH_MAX_CONCURRENCY)`) executing hierarchical chunked summarization per document on the shared `SummarizationModel` |
+| **Structured Extraction** | `bounded_concurrent` | Fixed worker pool (`min(N, BATCH_MAX_CONCURRENCY, BATCH_EXTRACTION_CONCURRENCY)`) running Ollama `/api/generate` calls with per-item schema grounding |
+
+### 2. Batch Configuration
+Configure resource and throughput bounds via `.env` or environment variables:
+
+```env
+BATCH_MAX_SIZE=20                 # Max items per batch request (422 above this limit)
+BATCH_MAX_CONCURRENCY=4           # Max concurrent worker coroutines per batch
+BATCH_INFERENCE_CHUNK_SIZE=8      # Micro-batch size for Transformer tensor passes
+BATCH_EXTRACTION_CONCURRENCY=2    # Concurrency cap for local Ollama extraction requests
+```
+
+### 3. API Examples & Partial Failure Behavior
+Request example (`POST /api/v1/nlp/batch/sentiment`):
+
+```json
+{
+  "items": [
+    {"id": "review-1", "text": "NLPulse delivers fast and accurate inference."},
+    {"id": "review-2", "text": "   "},
+    {"id": "review-3", "text": "Unexpected timeout during downstream test."}
+  ]
+}
+```
+
+Response (`200 OK`, preserving exact item order and `id`):
+
+```json
+{
+  "capability": "sentiment",
+  "execution_mode": "batched_inference",
+  "model_id": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+  "total_items": 3,
+  "succeeded_count": 2,
+  "failed_count": 1,
+  "total_cost_units": 2,
+  "latency_ms": 14.2,
+  "results": [
+    {
+      "index": 0,
+      "id": "review-1",
+      "status": "success",
+      "result": {
+        "label": "POSITIVE",
+        "confidence": 0.9921,
+        "scores": {"POSITIVE": 0.9921, "NEGATIVE": 0.0079},
+        "model_id": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+        "latency_ms": 6.8
+      },
+      "error": null,
+      "cost_units": 1,
+      "latency_ms": 6.8
+    },
+    {
+      "index": 1,
+      "id": "review-2",
+      "status": "error",
+      "result": null,
+      "error": {
+        "code": "validation_error",
+        "message": "Input text cannot be empty or solely whitespace.",
+        "status_code": 422
+      },
+      "cost_units": 0,
+      "latency_ms": 0.0
+    },
+    {
+      "index": 2,
+      "id": "review-3",
+      "status": "success",
+      "result": {
+        "label": "NEGATIVE",
+        "confidence": 0.9634,
+        "scores": {"NEGATIVE": 0.9634, "POSITIVE": 0.0366},
+        "model_id": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+        "latency_ms": 6.8
+      },
+      "error": null,
+      "cost_units": 1,
+      "latency_ms": 6.8
+    }
+  ]
+}
+```
+
+### 4. Failure Semantics, Atomic Quota Reservation & Metering
+- **Envelope vs. Item Validation:** Empty (`items: []`) or oversized (`len(items) > BATCH_MAX_SIZE`) requests fail with HTTP `422`. Invalid individual items (blank text, invalid parameter ranges, malformed per-item extraction output, or upstream Ollama errors) fail safely inside `results[i].error` without invalidating healthy items.
+- **Atomic Quota Reservation:** `UsageService.reserve_quota` serializes per-tenant reservation checks (`QuotaReservationManager` + `SELECT ... FOR UPDATE`), rejecting batches with HTTP `429` before inference if `committed + reserved + executable_items > monthly_request_quota`. Concurrent batches cannot race past quota limits.
+- **Accurate Usage Settlement:** Only items with `status == "success"` generate persisted `UsageRecord` rows (`endpoint="/api/v1/nlp/batch/<capability>"`) and contribute to `total_cost_units`. Failed or cancelled items incur zero quota consumption and zero cost units, and reservations are always released in `finally` blocks even on `asyncio.CancelledError`.
 
 ---
 
@@ -263,54 +389,16 @@ Interactive documentation:
 
 ## Running Tests
 
-Run the full test suite with Pytest:
+Run the offline unit and integration test suite with Pytest (smoke tests requiring live Hugging Face downloads are deselected by default in `pyproject.toml`):
 
 ```bash
 pytest -v
 ```
 
-Expected output:
-```text
-tests/integration/test_auth_api.py::test_developer_registration PASSED
-tests/integration/test_auth_api.py::test_developer_registration_duplicate_email PASSED
-tests/integration/test_auth_api.py::test_api_key_issuance_and_auth_flow PASSED
-tests/integration/test_auth_api.py::test_authentication_failures PASSED
-tests/integration/test_auth_api.py::test_scope_enforcement PASSED
-tests/integration/test_auth_api.py::test_usage_summary_endpoint PASSED
-tests/integration/test_auth_api.py::test_tenant_cannot_revoke_other_tenant_key PASSED
-tests/integration/test_auth_api.py::test_rate_limiting_http PASSED
-tests/integration/test_auth_api.py::test_quota_exhaustion_http PASSED
-tests/integration/test_migrations.py::test_alembic_migration_upgrade_and_downgrade PASSED
-tests/unit/test_config.py::test_default_settings PASSED
-tests/unit/test_config.py::test_settings_environment_override PASSED
-tests/unit/test_config.py::test_get_settings_caching PASSED
-tests/unit/test_health.py::test_health_check_endpoint PASSED
-tests/unit/test_health.py::test_root_health_endpoint PASSED
-tests/unit/test_health.py::test_root_endpoint PASSED
-tests/unit/test_logging.py::test_json_formatter PASSED
-tests/unit/test_logging.py::test_setup_logging_text_and_json PASSED
-tests/unit/test_models.py::test_create_developer PASSED
-tests/unit/test_models.py::test_developer_unique_email PASSED
-tests/unit/test_models.py::test_create_api_key_and_relationship PASSED
-tests/unit/test_models.py::test_api_key_unique_hash PASSED
-tests/unit/test_models.py::test_api_key_revocation_and_expiration PASSED
-tests/unit/test_models.py::test_create_usage_record PASSED
-tests/unit/test_models.py::test_cascade_delete_developer PASSED
-tests/unit/test_delete_api_key_preserves_usage_record PASSED
-tests/unit/test_models.py::test_database_check_constraints PASSED
-tests/unit/test_rate_limiter.py::test_rate_limiter_allows_under_limit PASSED
-tests/unit/test_rate_limiter.py::test_rate_limiter_blocks_over_limit PASSED
-tests/unit/test_rate_limiter.py::test_rate_limiter_resets_after_window PASSED
-tests/unit/test_rate_limiter.py::test_rate_limiter_independent_keys PASSED
-tests/unit/test_security.py::test_generate_api_key PASSED
-tests/unit/test_security.py::test_verify_api_key PASSED
-tests/unit/test_services.py::test_developer_service_crud PASSED
-tests/unit/test_services.py::test_api_key_service_lifecycle PASSED
-tests/unit/test_services.py::test_api_key_expired_rejection PASSED
-tests/unit/test_services.py::test_usage_service_quota_enforcement PASSED
-tests/unit/test_tenant_isolation.py::test_tenant_isolation_api_keys PASSED
-tests/unit/test_tenant_isolation.py::test_tenant_isolation_usage_records PASSED
-====================== 133 passed, 3 deselected in 9.45s ======================
+To opt into live Hugging Face model smoke tests (requires internet access and model downloads):
+
+```bash
+RUN_REAL_MODEL_SMOKE=1 pytest -m smoke -v
 ```
 
 ---
@@ -325,6 +413,6 @@ tests/unit/test_tenant_isolation.py::test_tenant_isolation_usage_records PASSED
 | **M4** | Core NLP | Sentiment analysis, NER, zero-shot classification | ✅ Complete |
 | **M5** | Advanced NLP | Keyword extraction, summarization | ✅ Complete |
 | **M6** | Generative NLP | Ollama integration, structured information extraction | ✅ Complete |
-| **M7** | Batch Processing | Efficient multi-text inference and benchmarking | ⏳ Next |
-| **M8** | Integration & Verification | API integration, end-to-end tests, security verification | 📋 Planned |
+| **M7** | Batch Processing | Micro-batched inference, bounded worker pools, quota reservation, partial failures | ✅ Complete |
+| **M8** | Integration & Verification | API integration, end-to-end tests, security verification | ⏳ Next |
 | **M9** | Documentation & Portfolio | README, architecture docs, ADRs, interview preparation, final release | 📋 Planned |

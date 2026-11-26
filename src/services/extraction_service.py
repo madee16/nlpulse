@@ -151,7 +151,7 @@ class ExtractionService:
                 continue
 
             if not name:
-                continue
+                raise ExtractionValidationError("Extraction field name cannot be empty or whitespace.")
 
             if field_type not in _VALID_SCHEMA_TYPES - {"null"}:
                 raise ExtractionValidationError(
@@ -386,18 +386,16 @@ class ExtractionService:
 
         return self._sanitize_object(data, schema, source_text, prefix="$")
 
-    async def extract_structured_data(
+    def validate_and_prepare(
         self,
         text: str,
-        developer_id: uuid.UUID,
         schema_definition: Optional[Dict[str, Any]] = None,
         fields: Optional[List[Union[ExtractionField, Dict[str, Any]]]] = None,
         instructions: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.0,
-        api_key_id: Optional[uuid.UUID] = None,
-    ) -> Dict[str, Any]:
-        """Perform grounded information extraction using local LLM, validate JSON, and meter tokens."""
+    ) -> Tuple[str, Dict[str, Any], str, str, float]:
+        """Validate extraction parameters and construct the grounded Ollama user prompt."""
         if not text or not text.strip():
             raise ExtractionValidationError("Input text cannot be empty or whitespace.")
 
@@ -408,10 +406,15 @@ class ExtractionService:
                 f"(received {len(clean_text)} characters)."
             )
 
+        if temperature < 0.0 or temperature > 2.0:
+            raise ExtractionValidationError("temperature must be between 0.0 and 2.0.")
+
+        if instructions is not None and len(instructions) > 2000:
+            raise ExtractionValidationError("instructions cannot exceed 2000 characters.")
+
         target_schema = self._normalize_schema(schema_definition=schema_definition, fields=fields)
         target_model = model or settings.OLLAMA_MODEL
 
-        # Construct structured user prompt
         user_prompt_parts = [
             "TARGET JSON SCHEMA:",
             json.dumps(target_schema, indent=2),
@@ -433,10 +436,23 @@ class ExtractionService:
             "EXTRACTED JSON OBJECT:",
         ])
         user_prompt = "\n".join(user_prompt_parts)
+        return clean_text, target_schema, target_model, user_prompt, temperature
 
+    def compute_cost_units(self, total_tokens: int) -> int:
+        """Calculate transparent token-weighted cost units (minimum 1 unit)."""
+        return max(1, int(round((total_tokens * settings.EXTRACTION_COST_PER_1K_TOKENS) / 1000)))
+
+    async def execute_extraction_inference(
+        self,
+        clean_text: str,
+        target_schema: Dict[str, Any],
+        target_model: str,
+        user_prompt: str,
+        temperature: float,
+    ) -> Dict[str, Any]:
+        """Run Ollama generation and validate/sanitize output without recording DB usage."""
         start_time = time.perf_counter()
 
-        # Call local Ollama service
         ollama_result = await self.ollama_client.generate(
             prompt=user_prompt,
             system=_SYSTEM_GROUNDED_EXTRACTION_PROMPT,
@@ -447,7 +463,6 @@ class ExtractionService:
 
         latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
-        # Validate and structure returned output
         extracted_data = self._validate_and_sanitize_payload(
             raw_json_str=ollama_result["response"],
             schema=target_schema,
@@ -455,20 +470,7 @@ class ExtractionService:
         )
 
         total_tokens = ollama_result["total_tokens"]
-        # Cost units: 1 unit minimum + token rate (default: 5 units per 1,000 tokens)
-        cost_units = max(1, int(round((total_tokens * settings.EXTRACTION_COST_PER_1K_TOKENS) / 1000)))
-
-        # Meter usage atomically upon successful inference
-        await self.usage_service.record_usage(
-            developer_id=developer_id,
-            api_key_id=api_key_id,
-            endpoint=f"{settings.API_V1_PREFIX}/nlp/extraction",
-            method="POST",
-            status_code=200,
-            latency_ms=latency_ms,
-            input_character_count=len(clean_text),
-            cost_units=cost_units,
-        )
+        cost_units = self.compute_cost_units(total_tokens)
 
         return {
             "extracted_data": extracted_data,
@@ -479,3 +481,46 @@ class ExtractionService:
             "cost_units": cost_units,
             "latency_ms": latency_ms,
         }
+
+    async def extract_structured_data(
+        self,
+        text: str,
+        developer_id: uuid.UUID,
+        schema_definition: Optional[Dict[str, Any]] = None,
+        fields: Optional[List[Union[ExtractionField, Dict[str, Any]]]] = None,
+        instructions: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: float = 0.0,
+        api_key_id: Optional[uuid.UUID] = None,
+    ) -> Dict[str, Any]:
+        """Perform grounded information extraction using local LLM, validate JSON, and meter tokens."""
+        clean_text, target_schema, target_model, user_prompt, clamped_temp = self.validate_and_prepare(
+            text=text,
+            schema_definition=schema_definition,
+            fields=fields,
+            instructions=instructions,
+            model=model,
+            temperature=temperature,
+        )
+
+        payload = await self.execute_extraction_inference(
+            clean_text=clean_text,
+            target_schema=target_schema,
+            target_model=target_model,
+            user_prompt=user_prompt,
+            temperature=clamped_temp,
+        )
+
+        # Meter usage atomically upon successful inference
+        await self.usage_service.record_usage(
+            developer_id=developer_id,
+            api_key_id=api_key_id,
+            endpoint=f"{settings.API_V1_PREFIX}/nlp/extraction",
+            method="POST",
+            status_code=200,
+            latency_ms=payload["latency_ms"],
+            input_character_count=len(clean_text),
+            cost_units=payload["cost_units"],
+        )
+
+        return payload

@@ -60,6 +60,173 @@ class NLPService:
             )
         return clean_text
 
+    def validate_zero_shot_inputs(self, text: str, candidate_labels: Optional[List[str]]) -> Tuple[str, List[str]]:
+        """Validate and deduplicate text and candidate_labels for zero-shot classification."""
+        clean_text = self._validate_text(text)
+        if not candidate_labels:
+            raise NLPValidationError("candidate_labels must contain at least one label.")
+
+        seen = set()
+        clean_labels = []
+        for lbl in candidate_labels:
+            if not isinstance(lbl, str) or not lbl.strip():
+                raise NLPValidationError("Candidate labels must be non-empty strings.")
+            cleaned = lbl.strip()
+            if cleaned not in seen:
+                seen.add(cleaned)
+                clean_labels.append(cleaned)
+
+        if not clean_labels:
+            raise NLPValidationError("candidate_labels must contain at least one valid non-empty string.")
+        return clean_text, clean_labels
+
+    def validate_keyword_inputs(
+        self,
+        text: str,
+        max_keywords: int = 5,
+        ngram_range: Tuple[int, int] = (1, 1),
+    ) -> str:
+        """Validate text, max_keywords, and ngram_range for keyword extraction."""
+        clean_text = self._validate_text(text)
+        if max_keywords < 1 or max_keywords > 50:
+            raise NLPValidationError(f"max_keywords must be between 1 and 50 (received {max_keywords}).")
+
+        if len(ngram_range) != 2:
+            raise NLPValidationError("ngram_range must be a tuple or list of exactly two integers [min_n, max_n].")
+
+        min_n, max_n = ngram_range
+        if min_n < 1 or max_n < min_n or max_n > 3:
+            raise NLPValidationError(
+                f"Invalid ngram_range ({min_n}, {max_n}). Must satisfy 1 <= min_n <= max_n <= 3."
+            )
+        return clean_text
+
+    def rank_keywords(
+        self,
+        candidate_phrases: List[str],
+        doc_emb: np.ndarray,
+        cand_embs: np.ndarray,
+        max_keywords: int,
+    ) -> List[Dict[str, Any]]:
+        """Compute normalized cosine similarities and deterministic keyword ranking."""
+        dot_products = np.dot(cand_embs, doc_emb)
+        doc_norm = np.linalg.norm(doc_emb)
+        cand_norms = np.linalg.norm(cand_embs, axis=1)
+        sim_scores = dot_products / (np.maximum(doc_norm * cand_norms, 1e-9))
+        sim_scores = np.clip(sim_scores, -1.0, 1.0)
+
+        ranked: List[Dict[str, Any]] = [
+            {"keyword": phrase, "score": round(float(score), 4)}
+            for phrase, score in zip(candidate_phrases, sim_scores)
+        ]
+        ranked.sort(key=lambda x: (-x["score"], x["keyword"]))
+        return ranked[:max_keywords]
+
+    def validate_summarization_inputs(
+        self,
+        text: str,
+        min_length: int = 30,
+        max_length: int = 130,
+        do_sample: bool = False,
+        temperature: Optional[float] = None,
+    ) -> str:
+        """Validate document text and generation parameters for summarization."""
+        clean_text = self._validate_text(text, max_length=10000)
+
+        if min_length < 5 or max_length < min_length or max_length > 1000:
+            raise NLPValidationError(
+                f"Invalid length constraints: min_length={min_length}, max_length={max_length}. "
+                "Must satisfy 5 <= min_length <= max_length <= 1000."
+            )
+
+        if not do_sample and temperature is not None:
+            raise NLPValidationError("temperature can only be specified when do_sample=True.")
+
+        if do_sample and temperature is not None and (temperature <= 0.0 or temperature > 2.0):
+            raise NLPValidationError("temperature must be between 0.0 (exclusive) and 2.0 when do_sample=True.")
+
+        return clean_text
+
+    async def run_summarization_model(
+        self,
+        model: Any,
+        clean_text: str,
+        min_length: int,
+        max_length: int,
+        do_sample: bool,
+        temperature: Optional[float],
+    ) -> Tuple[str, int]:
+        """Execute chunked & bounded hierarchical summarization on a loaded SummarizationModel."""
+        tokenizer = getattr(getattr(model, "_pipeline", None), "tokenizer", None)
+        chunks = chunk_text_by_sentences(
+            clean_text,
+            chunk_size=settings.SUMMARIZATION_CHUNK_SIZE,
+            tokenizer=tokenizer,
+        )
+
+        if len(chunks) == 1:
+            res = await model.predict({
+                "text": chunks[0],
+                "min_length": min_length,
+                "max_length": max_length,
+                "do_sample": do_sample,
+                "temperature": temperature,
+            })
+            return res["summary_text"], 1
+
+        chunk_max_len = max(min_length, min(max_length, 80))
+        chunk_min_len = min(min_length, 20)
+        max_consolidation_rounds = 5
+
+        current_text = clean_text
+        current_chunks = chunks
+
+        for _ in range(max_consolidation_rounds):
+            if len(current_chunks) <= 1:
+                break
+
+            round_summaries = []
+            for chunk in current_chunks:
+                chunk_res = await model.predict({
+                    "text": chunk,
+                    "min_length": chunk_min_len,
+                    "max_length": chunk_max_len,
+                    "do_sample": do_sample,
+                    "temperature": temperature,
+                })
+                summary_part = chunk_res["summary_text"].strip()
+                if summary_part:
+                    round_summaries.append(summary_part)
+
+            consolidated_input = " ".join(round_summaries).strip()
+            if not consolidated_input:
+                break
+
+            next_chunks = chunk_text_by_sentences(
+                consolidated_input,
+                chunk_size=settings.SUMMARIZATION_CHUNK_SIZE,
+                tokenizer=tokenizer,
+            )
+
+            no_progress = (
+                len(next_chunks) >= len(current_chunks)
+                and len(consolidated_input) >= len(current_text)
+            )
+            current_text = consolidated_input
+            current_chunks = next_chunks
+            if len(current_chunks) <= 1 or no_progress:
+                break
+
+        final_input = current_text if len(current_chunks) <= 1 else current_chunks[0]
+        final_res = await model.predict({
+            "text": final_input,
+            "min_length": min_length,
+            "max_length": max_length,
+            "do_sample": do_sample,
+            "temperature": temperature,
+        })
+        return final_res["summary_text"], len(chunks)
+
     async def analyze_sentiment(
         self,
         text: str,
@@ -137,25 +304,7 @@ class NLPService:
         api_key_id: Optional[uuid.UUID] = None,
     ) -> Dict[str, Any]:
         """Execute zero-shot text classification and meter usage upon success."""
-        clean_text = self._validate_text(text)
-
-        # Validate candidate labels
-        if not candidate_labels:
-            raise NLPValidationError("candidate_labels must contain at least one label.")
-
-        # Clean and deduplicate while preserving order
-        seen = set()
-        clean_labels = []
-        for lbl in candidate_labels:
-            if not isinstance(lbl, str) or not lbl.strip():
-                raise NLPValidationError("Candidate labels must be non-empty strings.")
-            cleaned = lbl.strip()
-            if cleaned not in seen:
-                seen.add(cleaned)
-                clean_labels.append(cleaned)
-
-        if not clean_labels:
-            raise NLPValidationError("candidate_labels must contain at least one valid non-empty string.")
+        clean_text, clean_labels = self.validate_zero_shot_inputs(text, candidate_labels)
 
         model_id = settings.MODEL_ZERO_SHOT_ID
         model = await self.registry.get_model(model_id)
@@ -196,19 +345,8 @@ class NLPService:
         api_key_id: Optional[uuid.UUID] = None,
     ) -> Dict[str, Any]:
         """Extract and rank keywords/keyphrases using dense sentence embeddings and cosine similarity."""
-        clean_text = self._validate_text(text)
-
-        if max_keywords < 1 or max_keywords > 50:
-            raise NLPValidationError(f"max_keywords must be between 1 and 50 (received {max_keywords}).")
-
-        if len(ngram_range) != 2:
-            raise NLPValidationError("ngram_range must be a tuple or list of exactly two integers [min_n, max_n].")
-
+        clean_text = self.validate_keyword_inputs(text, max_keywords=max_keywords, ngram_range=ngram_range)
         min_n, max_n = ngram_range
-        if min_n < 1 or max_n < min_n or max_n > 3:
-            raise NLPValidationError(
-                f"Invalid ngram_range ({min_n}, {max_n}). Must satisfy 1 <= min_n <= max_n <= 3."
-            )
 
         candidate_phrases = extract_candidate_ngrams(
             text=clean_text,
@@ -247,24 +385,12 @@ class NLPService:
         all_texts = [clean_text] + candidate_phrases
         embeddings = await model.predict(all_texts)
 
-        # Normalize and compute cosine similarities
-        doc_emb = embeddings[0]
-        cand_embs = embeddings[1:]
-
-        # Compute cosine similarities
-        dot_products = np.dot(cand_embs, doc_emb)
-        doc_norm = np.linalg.norm(doc_emb)
-        cand_norms = np.linalg.norm(cand_embs, axis=1)
-        sim_scores = dot_products / (np.maximum(doc_norm * cand_norms, 1e-9))
-        sim_scores = np.clip(sim_scores, -1.0, 1.0)
-
-        ranked: List[Dict[str, Any]] = [
-            {"keyword": phrase, "score": round(float(score), 4)}
-            for phrase, score in zip(candidate_phrases, sim_scores)
-        ]
-        # Deterministic sorting: descending by score, ascending by keyword for ties
-        ranked.sort(key=lambda x: (-x["score"], x["keyword"]))
-        top_keywords = ranked[:max_keywords]
+        top_keywords = self.rank_keywords(
+            candidate_phrases=candidate_phrases,
+            doc_emb=embeddings[0],
+            cand_embs=embeddings[1:],
+            max_keywords=max_keywords,
+        )
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
 
         # Record usage
@@ -297,99 +423,26 @@ class NLPService:
         api_key_id: Optional[uuid.UUID] = None,
     ) -> Dict[str, Any]:
         """Generate abstractive text summary, handling long documents via chunking and consolidation."""
-        clean_text = self._validate_text(text, max_length=10000)
-
-        if min_length < 5 or max_length < min_length or max_length > 1000:
-            raise NLPValidationError(
-                f"Invalid length constraints: min_length={min_length}, max_length={max_length}. "
-                "Must satisfy 5 <= min_length <= max_length <= 1000."
-            )
-
-        if not do_sample and temperature is not None:
-            raise NLPValidationError("temperature can only be specified when do_sample=True.")
-
-        if do_sample and temperature is not None and (temperature <= 0.0 or temperature > 2.0):
-            raise NLPValidationError("temperature must be between 0.0 (exclusive) and 2.0 when do_sample=True.")
+        clean_text = self.validate_summarization_inputs(
+            text=text,
+            min_length=min_length,
+            max_length=max_length,
+            do_sample=do_sample,
+            temperature=temperature,
+        )
 
         model_id = settings.MODEL_SUMMARIZATION_ID
         model = await self.registry.get_model(model_id)
 
         start = time.perf_counter()
-        tokenizer = getattr(getattr(model, "_pipeline", None), "tokenizer", None)
-        # Chunk text if document exceeds chunk size or token threshold
-        chunks = chunk_text_by_sentences(
-            clean_text,
-            chunk_size=settings.SUMMARIZATION_CHUNK_SIZE,
-            tokenizer=tokenizer,
+        final_summary, chunks_processed = await self.run_summarization_model(
+            model=model,
+            clean_text=clean_text,
+            min_length=min_length,
+            max_length=max_length,
+            do_sample=do_sample,
+            temperature=temperature,
         )
-
-        if len(chunks) == 1:
-            # Single-pass summarization
-            res = await model.predict({
-                "text": chunks[0],
-                "min_length": min_length,
-                "max_length": max_length,
-                "do_sample": do_sample,
-                "temperature": temperature,
-            })
-            final_summary = res["summary_text"]
-        else:
-            # Bounded hierarchical consolidation loop with strict shrinkage & iteration cap
-            chunk_max_len = max(min_length, min(max_length, 80))
-            chunk_min_len = min(min_length, 20)
-            max_consolidation_rounds = 5
-
-            current_text = clean_text
-            current_chunks = chunks
-
-            for _ in range(max_consolidation_rounds):
-                if len(current_chunks) <= 1:
-                    break
-
-                round_summaries = []
-                for chunk in current_chunks:
-                    chunk_res = await model.predict({
-                        "text": chunk,
-                        "min_length": chunk_min_len,
-                        "max_length": chunk_max_len,
-                        "do_sample": do_sample,
-                        "temperature": temperature,
-                    })
-                    summary_part = chunk_res["summary_text"].strip()
-                    if summary_part:
-                        round_summaries.append(summary_part)
-
-                consolidated_input = " ".join(round_summaries).strip()
-                if not consolidated_input:
-                    break
-
-                next_chunks = chunk_text_by_sentences(
-                    consolidated_input,
-                    chunk_size=settings.SUMMARIZATION_CHUNK_SIZE,
-                    tokenizer=tokenizer,
-                )
-
-                # Stop once reduced to a single chunk, or if no strict progress was achieved
-                no_progress = (
-                    len(next_chunks) >= len(current_chunks)
-                    and len(consolidated_input) >= len(current_text)
-                )
-                current_text = consolidated_input
-                current_chunks = next_chunks
-                if len(current_chunks) <= 1 or no_progress:
-                    break
-
-            # Final consolidation pass (bounded if pathological input prevented full convergence)
-            final_input = current_text if len(current_chunks) <= 1 else current_chunks[0]
-            final_res = await model.predict({
-                "text": final_input,
-                "min_length": min_length,
-                "max_length": max_length,
-                "do_sample": do_sample,
-                "temperature": temperature,
-            })
-            final_summary = final_res["summary_text"]
-
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
 
         # Record usage: cost units proportional to chunks processed
@@ -401,14 +454,14 @@ class NLPService:
             status_code=200,
             latency_ms=latency_ms,
             input_character_count=len(clean_text),
-            cost_units=len(chunks),
+            cost_units=chunks_processed,
         )
 
         return {
             "summary": final_summary,
             "original_character_count": len(clean_text),
             "summary_character_count": len(final_summary),
-            "chunks_processed": len(chunks),
+            "chunks_processed": chunks_processed,
             "model_id": model_id,
             "latency_ms": latency_ms,
         }

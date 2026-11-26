@@ -19,6 +19,11 @@ logger = get_logger("nlpulse.core.models.nlp")
 settings = get_settings()
 
 
+def _is_hf_pipeline(pipe: Any) -> bool:
+    """Detect whether a pipeline object is a full Hugging Face Pipeline supporting batched lists."""
+    return hasattr(pipe, "tokenizer") and hasattr(pipe, "model")
+
+
 class SentimentModel(BaseModel):
     """Sentiment analysis model using Hugging Face sequence classification."""
 
@@ -66,6 +71,20 @@ class SentimentModel(BaseModel):
         self._pipeline = None
         gc.collect()
 
+    def _format_sentiment_items(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Convert raw pipeline label-score dicts into canonical SentimentResponse payload."""
+        if not items:
+            raise ValueError("Sentiment pipeline returned an empty score list.")
+        scores: Dict[str, float] = {
+            item["label"]: round(float(item["score"]), 4) for item in items
+        }
+        top_item = max(items, key=lambda x: x["score"])
+        return {
+            "label": top_item["label"],
+            "confidence": round(float(top_item["score"]), 4),
+            "scores": scores,
+        }
+
     def _execute_inference(self, inputs: Any, **kwargs: Any) -> Dict[str, Any]:
         """Perform sentiment analysis forward pass.
 
@@ -88,16 +107,38 @@ class SentimentModel(BaseModel):
         else:
             raise ValueError(f"Unexpected pipeline return format: {raw_output}")
 
-        scores: Dict[str, float] = {
-            item["label"]: round(float(item["score"]), 4) for item in items
-        }
-        top_item = max(items, key=lambda x: x["score"])
+        return self._format_sentiment_items(items)
 
-        return {
-            "label": top_item["label"],
-            "confidence": round(float(top_item["score"]), 4),
-            "scores": scores,
-        }
+    def _execute_batch_inference(self, inputs: Any, **kwargs: Any) -> List[Dict[str, Any]]:
+        """Execute genuine tensor-batched sentiment analysis for a list of strings."""
+        if not isinstance(inputs, list) or not all(isinstance(t, str) for t in inputs):
+            raise ValueError("Expected list of strings for batched sentiment analysis.")
+        if not inputs:
+            return []
+
+        batch_size = max(1, int(kwargs.get("batch_size", settings.BATCH_INFERENCE_CHUNK_SIZE)))
+        if _is_hf_pipeline(self._pipeline):
+            raw_output = self._pipeline(inputs, batch_size=batch_size, truncation=True)
+            if isinstance(raw_output, list) and len(raw_output) == len(inputs):
+                return [
+                    self._format_sentiment_items(item if isinstance(item, list) else [item])
+                    for item in raw_output
+                ]
+            raise ValueError(f"Unexpected batched sentiment pipeline output: {raw_output}")
+
+        # Mock / custom callable: attempt batched call if supported, else fall back per item
+        try:
+            raw_output = self._pipeline(inputs)
+            if (
+                isinstance(raw_output, list)
+                and len(raw_output) == len(inputs)
+                and all(isinstance(el, list) for el in raw_output)
+            ):
+                return [self._format_sentiment_items(el) for el in raw_output]
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        return [self._execute_inference(text) for text in inputs]
 
 
 class NERModel(BaseModel):
@@ -147,19 +188,8 @@ class NERModel(BaseModel):
         self._pipeline = None
         gc.collect()
 
-    def _execute_inference(self, inputs: Any, **kwargs: Any) -> Dict[str, Any]:
-        """Perform NER extraction with subword aggregation.
-
-        Args:
-            inputs: Raw text string.
-
-        Returns:
-            Dictionary containing extracted entities, offsets, and entity count.
-        """
-        if not isinstance(inputs, str):
-            raise ValueError(f"Expected string input for NER, got {type(inputs).__name__}")
-
-        raw_entities = self._pipeline(inputs)
+    def _format_ner_entities(self, text: str, raw_entities: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Normalize raw token-classification output spans into canonical NER payload."""
         formatted_entities: List[Dict[str, Any]] = []
 
         for item in raw_entities:
@@ -174,8 +204,8 @@ class NERModel(BaseModel):
                 start, end = end, start
 
             word = item.get("word", "").strip()
-            if not word and 0 <= start <= end <= len(inputs):
-                word = inputs[start:end].strip()
+            if not word and 0 <= start <= end <= len(text):
+                word = text[start:end].strip()
 
             formatted_entities.append(
                 {
@@ -191,6 +221,50 @@ class NERModel(BaseModel):
             "entities": formatted_entities,
             "entity_count": len(formatted_entities),
         }
+
+    def _execute_inference(self, inputs: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Perform NER extraction with subword aggregation.
+
+        Args:
+            inputs: Raw text string.
+
+        Returns:
+            Dictionary containing extracted entities, offsets, and entity count.
+        """
+        if not isinstance(inputs, str):
+            raise ValueError(f"Expected string input for NER, got {type(inputs).__name__}")
+
+        raw_entities = self._pipeline(inputs)
+        return self._format_ner_entities(inputs, raw_entities)
+
+    def _execute_batch_inference(self, inputs: Any, **kwargs: Any) -> List[Dict[str, Any]]:
+        """Execute batched NER extraction across a list of texts."""
+        if not isinstance(inputs, list) or not all(isinstance(t, str) for t in inputs):
+            raise ValueError("Expected list of strings for batched NER.")
+        if not inputs:
+            return []
+
+        batch_size = max(1, int(kwargs.get("batch_size", settings.BATCH_INFERENCE_CHUNK_SIZE)))
+        if _is_hf_pipeline(self._pipeline):
+            raw_output = self._pipeline(inputs, batch_size=batch_size)
+            if len(inputs) == 1 and isinstance(raw_output, list) and all(isinstance(el, dict) for el in raw_output):
+                return [self._format_ner_entities(inputs[0], raw_output)]
+            if isinstance(raw_output, list) and len(raw_output) == len(inputs):
+                return [self._format_ner_entities(txt, ents) for txt, ents in zip(inputs, raw_output)]
+            raise ValueError(f"Unexpected batched NER pipeline output: {raw_output}")
+
+        try:
+            raw_output = self._pipeline(inputs)
+            if (
+                isinstance(raw_output, list)
+                and len(raw_output) == len(inputs)
+                and all(isinstance(el, list) for el in raw_output)
+            ):
+                return [self._format_ner_entities(txt, ents) for txt, ents in zip(inputs, raw_output)]
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        return [self._execute_inference(txt) for txt in inputs]
 
 
 class ZeroShotClassificationModel(BaseModel):
@@ -239,6 +313,30 @@ class ZeroShotClassificationModel(BaseModel):
         self._pipeline = None
         gc.collect()
 
+    def _format_zero_shot_output(self, raw_output: Any, multi_label: bool) -> Dict[str, Any]:
+        """Sort and normalize zero-shot pipeline dict output."""
+        if not isinstance(raw_output, dict):
+            raise ValueError(f"Unexpected pipeline return format: {type(raw_output).__name__}")
+
+        labels = raw_output.get("labels", [])
+        scores = raw_output.get("scores", [])
+
+        predictions: List[Dict[str, Any]] = [
+            {"label": lbl, "score": round(float(sc), 4)}
+            for lbl, sc in zip(labels, scores)
+        ]
+
+        # Explicitly guarantee descending order by score
+        predictions.sort(key=lambda x: x["score"], reverse=True)
+        top_pred = predictions[0] if predictions else None
+
+        return {
+            "top_label": top_pred["label"] if top_pred else None,
+            "top_score": top_pred["score"] if top_pred else None,
+            "predictions": predictions,
+            "multi_label": multi_label,
+        }
+
     def _execute_inference(self, inputs: Any, **kwargs: Any) -> Dict[str, Any]:
         """Perform zero-shot classification forward pass.
 
@@ -265,29 +363,59 @@ class ZeroShotClassificationModel(BaseModel):
             candidate_labels=candidate_labels,
             multi_label=multi_label,
         )
+        return self._format_zero_shot_output(raw_output, multi_label=multi_label)
 
-        if not isinstance(raw_output, dict):
-            raise ValueError(f"Unexpected pipeline return format: {type(raw_output).__name__}")
+    def _execute_batch_inference(self, inputs: Any, **kwargs: Any) -> List[Dict[str, Any]]:
+        """Execute batched zero-shot NLI classification for texts sharing candidate_labels."""
+        if not isinstance(inputs, dict):
+            raise ValueError("Batched zero-shot input must be a dictionary with 'texts' and 'candidate_labels'")
 
-        labels = raw_output.get("labels", [])
-        scores = raw_output.get("scores", [])
+        texts = inputs.get("texts", [])
+        candidate_labels = inputs.get("candidate_labels", [])
+        multi_label = bool(inputs.get("multi_label", False))
 
-        predictions: List[Dict[str, Any]] = [
-            {"label": lbl, "score": round(float(sc), 4)}
-            for lbl, sc in zip(labels, scores)
+        if not isinstance(texts, list) or not all(isinstance(t, str) and t for t in texts):
+            raise ValueError("Batched zero-shot 'texts' must be a list of non-empty strings")
+        if not candidate_labels:
+            raise ValueError("Candidate labels list cannot be empty")
+        if not texts:
+            return []
+
+        batch_size = max(1, int(kwargs.get("batch_size", settings.BATCH_INFERENCE_CHUNK_SIZE)))
+        if _is_hf_pipeline(self._pipeline):
+            raw_output = self._pipeline(
+                texts,
+                candidate_labels=candidate_labels,
+                multi_label=multi_label,
+                batch_size=batch_size,
+            )
+            if isinstance(raw_output, dict) and len(texts) == 1:
+                return [self._format_zero_shot_output(raw_output, multi_label=multi_label)]
+            if isinstance(raw_output, list) and len(raw_output) == len(texts):
+                return [self._format_zero_shot_output(item, multi_label=multi_label) for item in raw_output]
+            raise ValueError(f"Unexpected batched zero-shot pipeline output: {raw_output}")
+
+        try:
+            raw_output = self._pipeline(
+                texts,
+                candidate_labels=candidate_labels,
+                multi_label=multi_label,
+            )
+            if (
+                isinstance(raw_output, list)
+                and len(raw_output) == len(texts)
+                and all(isinstance(el, dict) for el in raw_output)
+            ):
+                return [self._format_zero_shot_output(el, multi_label=multi_label) for el in raw_output]
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        return [
+            self._execute_inference(
+                {"text": t, "candidate_labels": candidate_labels, "multi_label": multi_label}
+            )
+            for t in texts
         ]
-
-        # Explicitly guarantee descending order by score
-        predictions.sort(key=lambda x: x["score"], reverse=True)
-
-        top_pred = predictions[0] if predictions else None
-
-        return {
-            "top_label": top_pred["label"] if top_pred else None,
-            "top_score": top_pred["score"] if top_pred else None,
-            "predictions": predictions,
-            "multi_label": multi_label,
-        }
 
 
 class EmbeddingModel(BaseModel):

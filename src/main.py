@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 
+from src.api.routes.batch import router as batch_router
 from src.api.routes.developers import router as developers_router
 from src.api.routes.health import router as health_router
 from src.api.routes.keys import router as keys_router
@@ -209,6 +210,7 @@ def create_application() -> FastAPI:
     app.include_router(developers_router, prefix=settings.API_V1_PREFIX)
     app.include_router(keys_router, prefix=settings.API_V1_PREFIX)
     app.include_router(models_router, prefix=settings.API_V1_PREFIX)
+    app.include_router(batch_router, prefix=settings.API_V1_PREFIX)
     app.include_router(nlp_router, prefix=settings.API_V1_PREFIX)
     app.include_router(usage_router, prefix=settings.API_V1_PREFIX)
     app.include_router(protected_router, prefix=settings.API_V1_PREFIX)
