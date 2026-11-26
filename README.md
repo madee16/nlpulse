@@ -1,4 +1,4 @@
-# NLPulse — Intelligent Text Analysis API (NLP-as-a-Service)
+# NLPulse — Intelligent Text Analysis API
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com)
@@ -6,288 +6,426 @@
 [![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-336791.svg?logo=postgresql)](https://www.postgresql.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**NLPulse** is a high-performance developer-facing REST API providing Natural Language Processing as a Service. It delivers end-to-end NLP pipelines including sentiment analysis, named entity recognition (NER), zero-shot text classification, keyword extraction, text summarization, and LLM-powered structured extraction.
+**NLPulse** is a developer-facing **NLP-as-a-Service REST API** built with FastAPI, PostgreSQL 16, Hugging Face Transformers, and optional local Ollama inference. It combines applied NLP pipelines, local LLM-based structured extraction, and batch processing with API key authentication, granular scope authorization, rate limiting, atomic quota enforcement, and bounded model memory management.
+
+> **Documentation Index:** [Architecture](docs/ARCHITECTURE.md) · [ADRs](docs/adr/001-api-first-monolithic-architecture.md) · [Interview Guide](docs/INTERVIEW_GUIDE.md) · [Portfolio Overview](docs/PORTFOLIO_OVERVIEW.md)
 
 ---
 
-## Current Status: M1–M8 Complete ✅
+## Why NLPulse Exists
 
-- ✅ **M1: Foundations & Database** — Project structure, PostgreSQL 16, async SQLAlchemy 2.x session lifecycle, models (`Developer`, `APIKey`, `UsageRecord`), and Alembic async migrations.
-- ✅ **M2: Security & Authentication** — API keys, SHA-256 constant-time hashing, scope enforcement, sliding window rate limiting, monthly database quotas, and tenant isolation.
-- ✅ **M3: Model Lifecycle Management** — Lazy model initialization, thread-safe `ModelRegistry`, LRU eviction with in-use protection, hardware detection (`DeviceManager` for CUDA GPU/CPU), per-model concurrency control, event-loop offloading via `asyncio.to_thread` with shielded thread lifecycle retention, and FastAPI lifespan integration.
-- ✅ **M4: Core NLP** — Sentiment analysis (`distilbert-base-uncased-finetuned-sst-2-english`), Named Entity Recognition (`bert-base-NER` with subword BPE token aggregation), and Zero-Shot text classification (`distilbart-mnli-12-1` with single-label softmax & multi-label sigmoid scoring). Complete end-to-end API integration with rate limiting, monthly quota enforcement, and per-tenant usage metering.
-- ✅ **M5: Advanced NLP** — Dense embedding keyword and keyphrase extraction (`sentence-transformers/all-MiniLM-L6-v2` with cosine similarity ranking and customizable n-gram / stopword filtering) and abstractive document summarization (`sshleifer/distilbart-cnn-12-6` with token-bounded sentence chunking and hierarchical consolidation). Fully integrated with LRU cache eviction, scopes (`keywords:read`, `summarization:read`), rate limits, quotas, and atomic usage metering.
-- ✅ **M6: Generative NLP** — Local LLM integration via asynchronous `OllamaClient`, structured information extraction (`POST /api/v1/nlp/extraction`) adhering to JSON Schema or field specifications, programmatic schema validation with null fallbacks for unstated fields, strict factual grounding, configurable instruct models (e.g. `qwen2.5:3b`, `llama3.2:3b`), and transparent token-based cost unit metering.
-- ✅ **M7: Batch Processing** — Multi-item REST endpoints across all 6 NLP capabilities (`/api/v1/nlp/batch/*`) featuring micro-batched tensor inference, cross-document deduplicated embedding batching, bounded concurrent worker pools, partial-failure isolation with stable ordering, atomic quota reservation, and accurate per-item + aggregate metering.
-- ✅ **M8: Integration & Verification** — Cross-milestone integration audit, security hardening (strict empty-scope rejection, `/keys` & `/usage` scopes, atomic single-request quota reservation, safe `503`/`500` handling, zero-shot input bounds, `:path` routing for slashed HF model IDs), PostgreSQL 16.15 AB-BA deadlock elimination, and regression/reliability verification.
-- ⏳ **M9: Documentation & Portfolio** — Next: Portfolio architecture documentation, ADRs, and final presentation.
+Production AI backends rarely wrap a single inference call in isolation. Even small workstation deployments (`6 GB VRAM / 16 GB RAM`) require controlled lazy model loading, cache eviction, worker-thread isolation, tenant quotas, safe error boundaries, and partial-failure batch semantics. NLPulse addresses this by providing an API-first monolithic service with standardized REST contracts across both deterministic Transformer models and optional local generative extraction.
 
 ---
 
-## Tech Stack
+## Core Capabilities
 
-- **Language:** Python 3.12
-- **Framework:** FastAPI
-- **Configuration & Validation:** Pydantic v2, Pydantic Settings, email-validator
-- **Database:** PostgreSQL 16 (orchestrated via Docker Compose)
-- **Database Driver / ORM:** SQLAlchemy 2.x (async), Asyncpg
-- **Migrations:** Alembic (async)
-- **Testing:** Pytest, pytest-asyncio, HTTPX, aiosqlite
-- **Server:** Uvicorn (ASGI)
+NLPulse separates **deterministic local Transformer/embedding pipelines** (requiring only Python dependencies and Hugging Face weights on demand) from **optional local generative extraction** (delegated asynchronously to a local Ollama service):
 
----
-
-## Project Structure
-
-```text
-02-NLPulse/
-├── .env.example              # Environment variables template
-├── .gitignore                # Git ignore for Python, venv, caches, weights
-├── Dockerfile                # Container build specification
-├── alembic.ini               # Alembic configuration
-├── docker-compose.yml        # PostgreSQL 16 local orchestration
-├── pyproject.toml            # Project metadata and build configuration
-├── requirements.txt          # Python dependencies
-├── README.md                 # Project documentation
-├── migrations/               # Alembic migration revisions
-│   ├── env.py                # Async migration runner (zero hardcoded secrets)
-│   ├── script.py.mako
-│   └── versions/             # Migration scripts
-├── src/
-│   ├── __init__.py           # Application package root
-│   ├── main.py               # FastAPI entry point, lifespan & security headers
-│   ├── api/
-│   │   ├── __init__.py
-│   │   ├── deps.py           # Dependencies (get_db, auth, scopes, quota, rate-limit)
-│   │   └── routes/
-│   │       ├── __init__.py
-│   │       ├── batch.py      # M7 batch NLP endpoints (/api/v1/nlp/batch/*)
-│   │       ├── developers.py # Developer registration & profile endpoints
-│   │       ├── health.py     # Health check endpoint (/api/v1/health)
-│   │       ├── keys.py       # API key issuance, listing, and revocation
-│   │       ├── models.py     # Model lifecycle & hardware telemetry routes
-│   │       ├── nlp.py        # M4-M6 NLP inference endpoints
-│   │       ├── protected.py  # Scope & quota protected verification routes
-│   │       └── usage.py      # Monthly quota summary endpoints
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── config.py         # Pydantic Settings & environment variables
-│   │   ├── nlp_utils.py      # Stopword filtering, n-gram extraction, and chunking
-│   │   ├── device.py         # Hardware detection, CUDA GPU/CPU & VRAM telemetry
-│   │   ├── exceptions.py     # Domain exceptions (Auth, Quota, RateLimit, Model, Device)
-│   │   ├── logging.py        # Structured JSON & console logging
-│   │   ├── models/           # Standardized model lifecycle base abstractions
-│   │   │   ├── __init__.py
-│   │   │   ├── base.py       # BaseModel, ModelMetadata, ModelState, concurrency guards
-│   │   │   └── nlp.py        # Sentiment, NER, and Zero-Shot model implementations
-│   │   ├── rate_limiter.py   # Thread-safe striped sliding window rate limiter
-│   │   └── security.py       # SHA-256 API key hashing & constant-time comparison
-│   ├── db/
-│   │   ├── __init__.py
-│   │   ├── base.py           # Declarative base & metadata registry
-│   │   └── session.py        # Async engine & sessionmaker
-│   ├── models/
-│   │   ├── __init__.py       # Database model exports
-│   │   ├── api_key.py        # APIKey model & hash indexing
-│   │   ├── developer.py      # Developer tenant root model
-│   │   └── usage_record.py   # UsageRecord metering & audit model
-│   ├── schemas/
-│   │   ├── __init__.py
-│   │   ├── api_key.py        # API key request/response schemas
-│   │   ├── batch.py          # Batch request/response & partial-failure schemas (M7)
-│   │   ├── developer.py      # Developer registration/profile schemas
-│   │   ├── model.py          # Model telemetry & hardware metrics schemas
-│   │   ├── nlp.py            # NLP requests, responses, and entity schemas
-│   │   ├── extraction.py     # Schema definitions & extraction schemas (M6)
-│   │   └── usage.py          # Usage summary schemas
-│   └── services/
-│       ├── __init__.py
-│       ├── api_key_service.py   # Key issuance, hashing, and auth
-│       ├── batch_service.py     # M7 batch orchestration, concurrency & metering
-│       ├── developer_service.py # Tenant management & quota assignment
-│       ├── extraction_service.py# Generative structured extraction service (M6)
-│       ├── model_registry.py    # Lazy loading, LRU caching, eviction & locks
-│       ├── nlp_service.py       # Core NLP orchestration & atomic usage metering
-│       ├── ollama_client.py     # Asynchronous local Ollama HTTP client (M6)
-│       └── usage_service.py     # Metering, quota reservation & monthly checks
-└── tests/
-    ├── __init__.py
-    ├── conftest.py           # Pytest fixtures (async client & in-memory test DB)
-    ├── integration/
-    │   ├── __init__.py
-    │   ├── test_auth_api.py   # End-to-end API registration, auth, and scopes
-    │   ├── test_batch_api.py  # M7 batch API integration & quota race tests
-    │   ├── test_extraction_api.py # M6 structured extraction API tests
-    │   ├── test_m5_nlp_api.py # Keywords and summarization API tests
-    │   ├── test_m8_security_and_reliability.py # M8 security, validation & reliability tests
-    │   ├── test_migrations.py # Alembic upgrade/downgrade integration tests
-    │   ├── test_models_api.py # Model registry and hardware telemetry API tests
-    │   ├── test_nlp_api.py    # Core NLP (sentiment, ner, classification) API tests
-    │   └── test_postgres_real.py # Opt-in PostgreSQL 16 concurrency & constraint tests
-    ├── smoke/
-    │   ├── __init__.py
-    │   └── test_real_models_smoke.py # Opt-in live Hugging Face smoke tests
-    └── unit/
-        ├── __init__.py
-        ├── test_batch_models.py  # M7 model-level batch inference tests
-        ├── test_batch_quota.py   # M7 atomic quota reservation & settlement tests
-        ├── test_batch_schemas.py # M7 batch schema envelope & validation tests
-        ├── test_batch_service.py # M7 BatchService orchestration & cancellation tests
-        ├── test_config.py     # Configuration tests
-        ├── test_device.py     # Hardware detection & CUDA fallback tests
-        ├── test_extraction_service.py # M6 extraction schema validation tests
-        ├── test_health.py     # Health check endpoint tests
-        ├── test_logging.py    # Structured logging tests
-        ├── test_m3_lifecycle_hardening.py # Thread retention & CUDA OOM tests
-        ├── test_model_abstraction.py # BaseModel lifecycle, semaphore & offloading tests
-        ├── test_model_registry.py    # Lazy load, per-model lock & LRU cache tests
-        ├── test_models.py     # Model relationships, constraints, cascades
-        ├── test_nlp_models.py # Sentiment, NER, and Zero-Shot model unit tests
-        ├── test_nlp_service.py# NLPService inference & metering unit tests
-        ├── test_nlp_utils.py  # N-gram candidate extraction, stopwords, chunking tests
-        ├── test_m5_models.py  # EmbeddingModel and SummarizationModel unit tests
-        ├── test_m5_nlp_service.py # Keyword extraction & summarization service tests
-        ├── test_m5_lifecycle.py   # M5 lazy loading, concurrency & LRU eviction tests
-        ├── test_ollama_client.py  # M6 Ollama HTTP client unit tests
-        ├── test_rate_limiter.py # Sliding window rate limiter tests
-        ├── test_security.py   # Cryptographic API key tests
-        ├── test_security_audit_regression.py # Security audit regression tests
-        ├── test_services.py   # Business services unit tests
-        └── test_tenant_isolation.py # Multi-tenant isolation tests
-```
+| Capability | Individual Endpoint | Batch Endpoint | Execution Approach |
+| :--- | :--- | :--- | :--- |
+| **Sentiment Analysis** | `POST /api/v1/nlp/sentiment` | `POST /api/v1/nlp/batch/sentiment` | Transformer sequence classification; micro-batched tensor forward passes in batch mode |
+| **Named Entity Recognition** | `POST /api/v1/nlp/ner` | `POST /api/v1/nlp/batch/ner` | Token classification with subword aggregation and character offsets; micro-batched passes in batch mode |
+| **Zero-Shot Classification** | `POST /api/v1/nlp/classification` | `POST /api/v1/nlp/batch/classification` | NLI zero-shot scoring (single-label softmax or multi-label); grouped by label set in batch mode |
+| **Keyword Extraction** | `POST /api/v1/nlp/keywords` | `POST /api/v1/nlp/batch/keywords` | L2-normalized dense embeddings + cosine similarity ranking; cross-document candidate deduplication in batch mode |
+| **Abstractive Summarization** | `POST /api/v1/nlp/summarization` | `POST /api/v1/nlp/batch/summarization` | Token-bounded sentence chunking and hierarchical consolidation; bounded concurrent worker pool in batch mode |
+| **Structured Extraction *(Optional Ollama)*** | `POST /api/v1/nlp/extraction` | `POST /api/v1/nlp/batch/extraction` | Grounded JSON extraction against JSON Schema or field specs via local Ollama `/api/generate` (`httpx`) |
 
 ---
 
-## API Endpoints (Milestones 1–8)
+## Technology Stack
 
-| Method | Endpoint | Auth Required | Scopes | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `GET` | `/` | No | - | API root & discovery metadata |
-| `GET` | `/api/v1/health` | No | - | Service health check |
-| `POST` | `/api/v1/developers` | No | - | Register developer (enforces free tier & returns bootstrap API key) |
-| `GET` | `/api/v1/developers/me` | `X-API-Key` | - | View authenticated developer profile & quota |
-| `POST` | `/api/v1/keys` | `X-API-Key` | `keys:write` / `admin` | Create a child API key (non-empty scopes subset of caller's key) |
-| `GET` | `/api/v1/keys` | `X-API-Key` | `keys:read` / `keys:write` / `admin` | List all API keys for tenant |
-| `DELETE` | `/api/v1/keys/{key_id}` | `X-API-Key` | `keys:write` / `admin` | Revoke an API key |
-| `GET` | `/api/v1/usage/summary` | `X-API-Key` | `usage:read` / `admin` | Monthly quota consumption & remaining requests |
-| `POST` | `/api/v1/nlp/sentiment` | `X-API-Key` | `sentiment:read` | DistilBERT sentiment analysis & confidence distribution |
-| `POST` | `/api/v1/nlp/ner` | `X-API-Key` | `ner:read` | BERT named entity recognition with character span offsets |
-| `POST` | `/api/v1/nlp/classification` | `X-API-Key` | `classification:read` | DistilBART zero-shot classification (single or multi-label) |
-| `POST` | `/api/v1/nlp/keywords` | `X-API-Key` | `keywords:read` | MiniLM dense embedding keyword & keyphrase ranking |
-| `POST` | `/api/v1/nlp/summarization` | `X-API-Key` | `summarization:read` | DistilBART abstractive text summarization with chunking |
-| `POST` | `/api/v1/nlp/extraction` | `X-API-Key` | `extraction:read` | Local LLM grounded structured information extraction (M6) |
-| `POST` | `/api/v1/nlp/batch/sentiment` | `X-API-Key` | `sentiment:read` | Micro-batched sentiment analysis with partial-failure isolation (M7) |
-| `POST` | `/api/v1/nlp/batch/ner` | `X-API-Key` | `ner:read` | Micro-batched NER across multiple texts (M7) |
-| `POST` | `/api/v1/nlp/batch/classification` | `X-API-Key` | `classification:read` | Grouped batched zero-shot classification (M7) |
-| `POST` | `/api/v1/nlp/batch/keywords` | `X-API-Key` | `keywords:read` | Cross-document deduplicated embedding keyword batching (M7) |
-| `POST` | `/api/v1/nlp/batch/summarization` | `X-API-Key` | `summarization:read` | Bounded concurrent hierarchical summarization batch (M7) |
-| `POST` | `/api/v1/nlp/batch/extraction` | `X-API-Key` | `extraction:read` | Bounded concurrent Ollama structured extraction batch (M7) |
-| `GET` | `/api/v1/models` | `X-API-Key` | `models:read` / `admin` | List registered models and operational status |
-| `GET` | `/api/v1/models/{model_id:path}` | `X-API-Key` | `models:read` / `admin` | Retrieve model telemetry and loading state (supports HF `org/model` IDs) |
-| `POST` | `/api/v1/models/{model_id:path}/unload` | `X-API-Key` | `admin` | Explicitly unload model and release GPU/RAM |
-| `GET` | `/api/v1/hardware` | `X-API-Key` | `admin` | Inspect compute hardware, GPU availability, and VRAM |
-
-> **Scope Compatibility:** All `/api/v1/nlp/*` and `/api/v1/nlp/batch/*` endpoints also accept `nlp:read`, `analyze:read` (legacy compatibility), and `admin`. Extraction endpoints also accept `generate:read`.
-
----
-
-## Advanced NLP Architecture (Milestone 5)
-
-### 1. Keyword & Keyphrase Extraction Methodology
-NLPulse implements an embedding-based semantic keyword extractor inspired by KeyBERT:
-1. **Candidate N-Gram Generation:** Extracts words and phrases bounded by configurable n-gram ranges ($1 \le \text{min\_n} \le \text{max\_n} \le 3$).
-2. **Stopword Elimination:** Evaluates candidate edges against a comprehensive, zero-dependency English stopword set. Phrases beginning or ending with stopwords are pruned.
-3. **Dense Semantic Embedding:** Uses `sentence-transformers/all-MiniLM-L6-v2` (~22.7M parameters, ~90 MB memory) to generate 384-dimensional dense vectors with mean-pooling and L2 unit-normalization.
-4. **Cosine Similarity Ranking:** Calculates semantic similarity between the document vector and candidate vectors $\text{sim}(\mathbf{d}, \mathbf{c}) = \frac{\mathbf{d} \cdot \mathbf{c}}{\|\mathbf{d}\| \|\mathbf{c}\|}$, sorting results in descending relevance order.
-
-### 2. Abstractive Summarization & Long-Document Chunking
-1. **Sequence-to-Sequence Generation:** Leverages `sshleifer/distilbart-cnn-12-6` (~306M parameters, ~600 MB VRAM / ~1.2 GB RAM), fine-tuned on CNN/DailyMail for concise abstractive summarization.
-2. **Long-Document Strategy:** When input texts exceed the single-pass chunk limit (`SUMMARIZATION_CHUNK_SIZE=1800` characters), the document is split across sentence boundaries using `chunk_text_by_sentences`. Each chunk is summarized independently, followed by a bounded hierarchical consolidation loop across chunk summaries.
-3. **Usage Attribution:** Metering tracks `cost_units` equal to the number of document chunks processed, ensuring fair billing attribution.
-
-### 3. Hardware Requirements & Model Lifecycle
-- **Target Hardware:** Tested and validated for modern multicore CPUs and laptop GPUs (e.g. NVIDIA RTX 4050 6 GB VRAM, 16 GB RAM).
-- **LRU Cache Protection:** With `MODEL_MAX_CACHED=3`, loading subsequent models automatically evicts the least recently used idle model while shielding active inferences.
-- **Known Limitations:**
-  - *Information Compression:* Abstractive summarization compresses text, which can omit minor contextual nuances in highly technical documents.
-  - *Hallucination Risk:* As with all pretrained autoregressive sequence-to-sequence models, extreme length constraints or domain-specific jargon may produce mild phrasing hallucinations.
-
----
-
-## Generative NLP & Structured Information Extraction (Milestone 6)
-
-### 1. Local LLM Architecture via Ollama
-NLPulse integrates local generative LLMs via an asynchronous HTTP client communicating with the local Ollama daemon service (`/api/generate`):
-- **Decoupled Architecture:** Ollama runs as a standalone local service without adding heavy generative dependencies to the core API runtime. Offline test suites run independently with zero live network or daemon dependencies.
-- **Model Recommendation:** Configured by default for lightweight instruct models (e.g. `qwen2.5:3b` or `llama3.2:3b`), requiring under 2.5 GB VRAM and operating smoothly on mobile/consumer workstation GPUs (such as RTX 4050 6 GB VRAM) as well as CPU fallbacks.
-- **Resilient Error Classification:** Custom exception hierarchy mapping service states:
-  - `503 Service Unavailable`: Local Ollama daemon unreachable or not running.
-  - `404 Not Found`: Model tag not downloaded in Ollama (`ollama pull <model>`).
-  - `504 Gateway Timeout`: Upstream Ollama request timed out before completing generation.
-  - `502 Bad Gateway`: Upstream Ollama generation failure or malformed response.
-  - `422 Unprocessable Entity`: Model output violates user-provided JSON schema.
-
-### 2. Schema-Grounded Information Extraction
-- **Flexible Schema Input:** Supports standard JSON Schema specifications (`schema_definition`) as well as developer-friendly field lists (`fields: [{"name": ..., "type": ...}]`).
-- **Strict Anti-Hallucination Grounding:** System instructions enforce strict factual adherence to the source document. If a requested property is not explicitly stated or directly inferable, the model is instructed to output JSON `null`.
-- **Programmatic Post-Generation Validation:** Strips any markdown code block wrappers, parses raw JSON, validates expected property types (numbers, booleans, arrays), and normalizes placeholder strings (e.g. "N/A", "none", "unknown") to `null`.
-- **Transparent Token-Based Metering:** Cost units are calculated proportionally based on input prompt and generated completion tokens (`EXTRACTION_COST_PER_1K_TOKENS=5`), recording atomic usage records linked to the developer tenant.
-
----
-
-## Batch Processing Architecture (Milestone 7)
-
-### 1. Execution Strategy: Tensor Batching vs. Bounded Concurrency
-NLPulse implements task-appropriate batching strategies tailored to 6 GB VRAM / 16 GB RAM resource limits and M3 `ModelRegistry` lifecycle safety:
-
-| Capability | `execution_mode` | Strategy |
+| Layer | Technologies Used | Role in NLPulse |
 | :--- | :--- | :--- |
-| **Sentiment** | `batched_inference` | True micro-batched tensor forward passes (`SentimentModel.predict_batch`, chunked by `BATCH_INFERENCE_CHUNK_SIZE`) with single-item fallback to isolate failing inputs |
-| **NER** | `batched_inference` | Micro-batched token classification (`NERModel.predict_batch`) with subword aggregation and isolated fallback |
-| **Zero-Shot Classification** | `grouped_batched_inference` | Groups items sharing `(candidate_labels, multi_label)` into micro-batched NLI passes via `ZeroShotClassificationModel.predict_batch` |
-| **Keyword Extraction** | `deduplicated_batched_embeddings` | Extracts candidate n-grams per item, deduplicates all documents + candidates into a shared embedding pool, and encodes in bounded PyTorch tensor batches |
-| **Summarization** | `bounded_concurrent` | Fixed worker pool (`min(N, BATCH_MAX_CONCURRENCY)`) executing hierarchical chunked summarization per document on the shared `SummarizationModel` |
-| **Structured Extraction** | `bounded_concurrent` | Fixed worker pool (`min(N, BATCH_MAX_CONCURRENCY, BATCH_EXTRACTION_CONCURRENCY)`) running Ollama `/api/generate` calls with per-item schema grounding |
+| **API & Validation** | Python 3.12, FastAPI, Uvicorn, Pydantic v2, Pydantic Settings, `email-validator` | Asynchronous REST routing, OpenAPI generation, security headers/CORS middleware, strict request/response & env validation |
+| **Persistence & Migrations** | PostgreSQL 16, SQLAlchemy 2.x (async), `asyncpg`, Alembic, Docker Compose | Async ORM sessions (`pool_pre_ping`), tenant/key/usage schema with check constraints, cascade/audit foreign keys, reproducible schema migrations |
+| **Traditional & Embedding NLP** | PyTorch, Hugging Face `transformers`, NumPy | Lazy-loaded sequence/token classification, NLI zero-shot scoring, mean-pooled dense sentence embeddings, seq2seq summarization |
+| **Generative Extraction** | `httpx` (`AsyncClient`), Ollama *(optional)* | Decoupled HTTP transport to local LLM daemon (`POST /api/generate`) with timeout and error classification |
+| **Testing** | Pytest, `pytest-asyncio`, `httpx` (`ASGITransport`), `aiosqlite` | Fast offline SQLite + mocked pipeline suites alongside opt-in PostgreSQL 16 and opt-in Hugging Face smoke suites |
 
-### 2. Batch Configuration
-Configure resource and throughput bounds via `.env` or environment variables:
+---
 
-```env
-BATCH_MAX_SIZE=20                 # Max items per batch request (422 above this limit)
-BATCH_MAX_CONCURRENCY=4           # Max concurrent worker coroutines per batch
-BATCH_INFERENCE_CHUNK_SIZE=8      # Micro-batch size for Transformer tensor passes
-BATCH_EXTRACTION_CONCURRENCY=2    # Concurrency cap for local Ollama extraction requests
+## Architecture Overview
+
+```mermaid
+flowchart LR
+    Client["Client Application"] --> Middleware["SecurityHeadersMiddleware and CORSMiddleware"]
+    Middleware --> Deps["Auth, Scope Check, Rate Limit, Quota Guard"]
+    Deps --> Services["NLPService, BatchService, ExtractionService, UsageService"]
+
+    Deps --> RateLimiter["SlidingWindowRateLimiter (process-local)"]
+    Services --> QuotaMgr["QuotaReservationManager (process-local)"]
+    Services --> DB[("PostgreSQL 16")]
+
+    Services --> Registry["ModelRegistry (LRU max_cached_models=3)"]
+    Registry --> Workers["BaseModel + asyncio.to_thread Workers (CPU / CUDA auto-detect)"]
+    Services --> Ollama["OllamaClient (Optional Local LLM)"]
 ```
 
-### 3. API Examples & Partial Failure Behavior
-Request example (`POST /api/v1/nlp/batch/sentiment`):
+Key design highlights:
+- **Deadlock-Free Quota & Usage Metering:** Monthly quota checks reserve capacity before inference using 64-stripe in-process locks (`QuotaReservationManager`) instead of holding PostgreSQL `SELECT ... FOR UPDATE` row locks across slow ML calls, settling usage records atomically under the same lock (`src/services/usage_service.py`).
+- **Lifecycle-Safe Model Cache:** `ModelRegistry` deduplicates concurrent loads per model, enforces `MODEL_MAX_CACHED=3` across parallel distinct loads, protects busy models from LRU eviction, and shields off-loop worker threads (`asyncio.shield`) so inference timeouts never trigger unsafe unloading (`src/core/models/base.py`, `src/services/model_registry.py`).
+- **Tenant-Isolated Authentication:** `X-API-Key` secrets (`nlp_live_...`) are verified via SHA-256 digests (`hmac.compare_digest` utilities in `src/core/security.py`), enforcing non-delegable scopes, free-tier registration limits, and safe error sanitization (`503` on SQLAlchemy errors, `500` fallback).
 
+For full sequence diagrams, database constraints, and architectural tradeoffs, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/adr/](docs/adr/001-api-first-monolithic-architecture.md).
+
+---
+
+## Repository Layout
+
+| Path | Responsibility |
+| :--- | :--- |
+| `src/api/` | FastAPI dependency guards (`deps.py`) and routers (`health`, `developers`, `keys`, `usage`, `models`, `nlp`, `batch`, `protected`) |
+| `src/core/` | Settings, device/CUDA detection, domain exceptions, structured JSON/text logging, rate limiter, crypto helpers, NLP utils, and `BaseModel`/HF model wrappers |
+| `src/db/` & `src/models/` | Async SQLAlchemy engine/session factory and ORM models (`Developer`, `APIKey`, `UsageRecord`) |
+| `src/schemas/` | Pydantic v2 request/response contracts for auth, usage, telemetry, individual NLP, extraction, and batch envelopes |
+| `src/services/` | Domain services (`NLPService`, `BatchService`, `ExtractionService`, `ModelRegistry`, `UsageService`, `APIKeyService`, `DeveloperService`, `OllamaClient`) |
+| `migrations/` | Async Alembic environment (`env.py`) and schema revision history (`1687e8d000b1_initial_schema.py`) |
+| `tests/` | Unit suites, HTTP/SQLite integration suites, security regressions, opt-in PostgreSQL 16 integration (`test_postgres_real.py`), and opt-in HF smoke tests (`test_real_models_smoke.py`) |
+| `docs/` | Deep system architecture, ADRs (`001`–`007`), technical interview guide, and portfolio overview |
+
+---
+
+## Quick Start
+
+### Prerequisites
+- **Required:** Python **3.12+**, **PostgreSQL 16** (via Docker Compose or local PostgreSQL installation).
+- **Optional:** **Ollama** (only if calling `/api/v1/nlp/extraction` or `/api/v1/nlp/batch/extraction`), CUDA-enabled PyTorch + NVIDIA GPU (CPU execution works by default), internet access (first-time Hugging Face model download on demand).
+
+### 1. Clone and Install Dependencies
+
+```bash
+git clone https://github.com/madee16/nlpulse.git
+cd nlpulse
+
+python -m venv .venv
+# Windows (PowerShell):
+.\.venv\Scripts\Activate.ps1
+# Linux / macOS:
+# source .venv/bin/activate
+
+# Install runtime + test dependencies (or `pip install -e ".[dev]"`)
+pip install -r requirements.txt
+```
+
+### 2. Configure Environment Variables
+
+```bash
+cp .env.example .env
+```
+
+Adjust `POSTGRES_*` or `DATABASE_URL` in `.env` if not using the default Docker Compose settings. Default startup does not require Ollama.
+
+### 3. Start PostgreSQL 16 and Run Migrations
+
+```bash
+docker compose up -d
+alembic upgrade head
+```
+
+*(If running PostgreSQL natively without Docker Compose, ensure the target database exists and `DATABASE_URL` points to it before running `alembic upgrade head`.)*
+
+### 4. Start the API Server (Single-Worker)
+
+```bash
+uvicorn src.main:app --host 0.0.0.0 --port 8000
+```
+
+Interactive OpenAPI explorers:
+- **Swagger UI:** `http://localhost:8000/docs`
+- **ReDoc:** `http://localhost:8000/redoc`
+
+### 5. Optional: Enable Local Generative Extraction (Ollama)
+
+```bash
+ollama pull qwen2.5:3b
+ollama serve
+```
+
+If Ollama is not running, all other NLP, batch, auth, and model routes continue working normally; extraction routes cleanly report `503` (or per-item `503` in batch mode).
+
+---
+
+## Configuration Reference
+
+Settings are defined in `src/core/config.py` and templated in `.env.example`:
+
+| Variable | Purpose | Required | Default | Sensitive |
+| :--- | :--- | :--- | :--- | :--- |
+| `APP_NAME` | Service display title | No | `NLPulse` | No |
+| `APP_ENV` | Environment label (`development`, `staging`, etc.) | No | `development` | No |
+| `APP_VERSION` | Semantic API version exposed in OpenAPI/health | No | `0.1.0` | No |
+| `DEBUG` | Enables SQLAlchemy SQL echo logging when `true` | No | `false` | No |
+| `API_V1_PREFIX` | URL prefix for versioned API routes | No | `/api/v1` | No |
+| `HOST` | Bind host configuration field | No | `0.0.0.0` | No |
+| `PORT` | Bind port configuration field | No | `8000` | No |
+| `LOG_LEVEL` | Root logging threshold (`INFO`, `DEBUG`, etc.) | No | `INFO` | No |
+| `LOG_FORMAT` | Output format (`json` or `text`) | No | `json` | No |
+| `POSTGRES_SERVER` | PostgreSQL hostname when assembling `DATABASE_URL` | No* | `localhost` | No |
+| `POSTGRES_PORT` | PostgreSQL port | No* | `5432` | No |
+| `POSTGRES_USER` | PostgreSQL username | No* | `postgres` | No |
+| `POSTGRES_PASSWORD` | PostgreSQL password (`assemble_db_connection`) | No* | `postgrespassword` | **Yes** |
+| `POSTGRES_DB` | PostgreSQL database name | No* | `nlpulse` | No |
+| `DATABASE_URL` | Full async SQLAlchemy URL (`postgresql+asyncpg://...`) | No* | Derived from `POSTGRES_*` | **Yes** |
+| `CORS_ORIGINS` | Allowed CORS origins (JSON list or comma-separated) | No | `["*"]` (`.env.example` sets localhost origins) | No |
+| `MODEL_DEVICE_PREFERENCE` | Compute target (`auto`, `cuda`, `cpu`) | No | `auto` | No |
+| `MODEL_MAX_CACHED` | Maximum concurrently cached HF models (`>= 1`) | No | `3` | No |
+| `MODEL_DEFAULT_CONCURRENCY` | Per-model semaphore concurrency cap | No | `2` | No |
+| `MODEL_INFERENCE_TIMEOUT_SECONDS` | Per-inference thread wait timeout (seconds) | No | `30.0` | No |
+| `MODEL_ENABLE_WARMUP` | Reserved setting; **not currently implemented** (startup always registers models lazily) | No | `false` | No |
+| `MODEL_SENTIMENT_ID` | Hugging Face sentiment pipeline repo ID | No | `distilbert/distilbert-base-uncased-finetuned-sst-2-english` | No |
+| `MODEL_NER_ID` | Hugging Face NER pipeline repo ID | No | `dslim/bert-base-NER` | No |
+| `MODEL_ZERO_SHOT_ID` | Hugging Face zero-shot NLI pipeline repo ID | No | `valhalla/distilbart-mnli-12-1` | No |
+| `NLP_MAX_TEXT_LENGTH` | Max input chars for sentiment, NER, zero-shot, keywords | No | `5000` | No |
+| `MODEL_EMBEDDING_ID` | Hugging Face embedding model repo ID | No | `sentence-transformers/all-MiniLM-L6-v2` | No |
+| `MODEL_SUMMARIZATION_ID` | Hugging Face summarization pipeline repo ID | No | `sshleifer/distilbart-cnn-12-6` | No |
+| `KEYWORD_MAX_CANDIDATES` | Maximum extracted n-gram candidates per item | No | `100` | No |
+| `SUMMARIZATION_CHUNK_SIZE` | Character target per summarization chunk (with 600-token cap) | No | `1800` | No |
+| `OLLAMA_BASE_URL` | Base URL for optional local Ollama HTTP API | No | `http://localhost:11434` | No |
+| `OLLAMA_MODEL` | Default local Ollama model tag | No | `qwen2.5:3b` | No |
+| `OLLAMA_TIMEOUT_SECONDS` | HTTP read/request timeout for Ollama generation (s) | No | `60.0` | No |
+| `OLLAMA_MAX_INPUT_LENGTH` | Max source text length for extraction requests | No | `15000` | No |
+| `EXTRACTION_COST_PER_1K_TOKENS` | Cost-unit weight per 1,000 Ollama tokens | No | `5` | No |
+| `BATCH_MAX_SIZE` | Max items allowed in any batch envelope | No | `20` | No |
+| `BATCH_MAX_CONCURRENCY` | Max concurrent worker coroutines per batch | No | `4` | No |
+| `BATCH_INFERENCE_CHUNK_SIZE` | Micro-batch size for batched Transformer passes | No | `8` | No |
+| `BATCH_EXTRACTION_CONCURRENCY` | Max concurrent Ollama workers per batch | No | `2` | No |
+| `NLPULSE_TEST_POSTGRES_URL` | Test-only env var enabling `pytest -m postgres` | No | Unset | **Yes** |
+| `RUN_REAL_MODEL_SMOKE` | Test-only flag (`1`) enabling `pytest -m smoke` | No | Unset | No |
+
+*\*Production PostgreSQL deployments should override default credentials via `DATABASE_URL` or `POSTGRES_PASSWORD`.*
+
+---
+
+## API Overview & Examples
+
+### Endpoint Summary
+
+All routes register cleanly in OpenAPI (`/api/v1/openapi.json`, `26` paths total). Protected endpoints expect the `X-API-Key` header.
+
+| Method | Path | Auth | Accepted Scopes | Purpose |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/`, `/health`, `/api/v1/health` | None | - | Discovery metadata and service health |
+| `POST` | `/api/v1/developers` | None | - | Register developer (free tier, `1000` quota) and return bootstrap `X-API-Key` once |
+| `GET` | `/api/v1/developers/me` | `X-API-Key` | Any active key | Inspect authenticated developer profile and monthly quota |
+| `POST` | `/api/v1/keys` | `X-API-Key` | `keys:write`, `admin`, `*` | Issue child API key (non-empty subset of caller scopes) |
+| `GET` | `/api/v1/keys` | `X-API-Key` | `keys:read`, `keys:write`, `admin`, `*` | List API keys owned by tenant (hashes never exposed) |
+| `DELETE` | `/api/v1/keys/{key_id}` | `X-API-Key` | `keys:write`, `admin`, `*` | Revoke an owned API key |
+| `GET` | `/api/v1/usage/summary` | `X-API-Key` | `usage:read`, `admin`, `*` | Monthly calendar usage, quota remaining, and percentage |
+| `POST` | `/api/v1/nlp/sentiment` | `X-API-Key` | `sentiment:read`, `nlp:read`, `analyze:read`, `admin`, `*` | Analyze text sentiment polarity and score distribution |
+| `POST` | `/api/v1/nlp/ner` | `X-API-Key` | `ner:read`, `nlp:read`, `analyze:read`, `admin`, `*` | Extract named entity spans with character offsets |
+| `POST` | `/api/v1/nlp/classification` | `X-API-Key` | `classification:read`, `nlp:read`, `analyze:read`, `admin`, `*` | Zero-shot classification against candidate labels |
+| `POST` | `/api/v1/nlp/keywords` | `X-API-Key` | `keywords:read`, `nlp:read`, `analyze:read`, `admin`, `*` | Dense embedding keyword and keyphrase ranking |
+| `POST` | `/api/v1/nlp/summarization` | `X-API-Key` | `summarization:read`, `nlp:read`, `analyze:read`, `admin`, `*` | Chunked abstractive summarization with length controls |
+| `POST` | `/api/v1/nlp/extraction` | `X-API-Key` | `extraction:read`, `generate:read`, `nlp:read`, `analyze:read`, `admin`, `*` | Schema-validated extraction via local Ollama |
+| `POST` | `/api/v1/nlp/batch/{capability}` | `X-API-Key` | Same scope rule as matching single capability | Batch `sentiment`, `ner`, `classification`, `keywords`, `summarization`, `extraction` |
+| `GET` | `/api/v1/models` | `X-API-Key` | `models:read`, `analyze:read`, `admin`, `*` | List registered models and lifecycle status |
+| `GET` | `/api/v1/models/{model_id:path}` | `X-API-Key` | `models:read`, `analyze:read`, `admin`, `*` | Inspect telemetry for a model ID (supports HF `org/model` paths) |
+| `POST` | `/api/v1/models/{model_id:path}/unload` | `X-API-Key` | `admin`, `*` | Unload a cached model from memory |
+| `GET` | `/api/v1/hardware` | `X-API-Key` | `admin`, `*` | Inspect host CPU/CUDA hardware metrics |
+| `GET` | `/api/v1/protected/sentiment` | `X-API-Key` | `sentiment:read`, `analyze:read`, `admin`, `*` | Minimal metered auth/scope verification route |
+| `GET` | `/api/v1/protected/admin-only` | `X-API-Key` | `admin`, `*` | Minimal admin-scope verification route |
+
+### Representative Schema-Verified Examples
+
+<details>
+<summary><strong>1. Sentiment Analysis — POST /api/v1/nlp/sentiment</strong></summary>
+
+Request:
+```json
+{
+  "text": "NLPulse delivers consistent inference latency with clear validation."
+}
+```
+Response (`200 OK`):
+```json
+{
+  "label": "POSITIVE",
+  "confidence": 0.9994,
+  "scores": {
+    "POSITIVE": 0.9994,
+    "NEGATIVE": 0.0006
+  },
+  "model_id": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+  "latency_ms": 28.4
+}
+```
+</details>
+
+<details>
+<summary><strong>2. Named Entity Recognition — POST /api/v1/nlp/ner</strong></summary>
+
+Request:
+```json
+{
+  "text": "Sundar Pichai announced new infrastructure in Mountain View."
+}
+```
+Response (`200 OK`):
+```json
+{
+  "entities": [
+    {
+      "entity": "PER",
+      "text": "Sundar Pichai",
+      "confidence": 0.9981,
+      "start_offset": 0,
+      "end_offset": 13
+    },
+    {
+      "entity": "LOC",
+      "text": "Mountain View",
+      "confidence": 0.9965,
+      "start_offset": 46,
+      "end_offset": 59
+    }
+  ],
+  "entity_count": 2,
+  "model_id": "dslim/bert-base-NER",
+  "latency_ms": 34.1
+}
+```
+</details>
+
+<details>
+<summary><strong>3. Zero-Shot Classification — POST /api/v1/nlp/classification</strong></summary>
+
+Request:
+```json
+{
+  "text": "Apple reported record quarterly revenue driven by services.",
+  "candidate_labels": ["finance", "technology", "sports"],
+  "multi_label": false
+}
+```
+Response (`200 OK`):
+```json
+{
+  "top_label": "finance",
+  "top_score": 0.6124,
+  "predictions": [
+    {"label": "finance", "score": 0.6124},
+    {"label": "technology", "score": 0.3712},
+    {"label": "sports", "score": 0.0164}
+  ],
+  "multi_label": false,
+  "model_id": "valhalla/distilbart-mnli-12-1",
+  "latency_ms": 74.0
+}
+```
+</details>
+
+<details>
+<summary><strong>4. Keyword Extraction — POST /api/v1/nlp/keywords</strong></summary>
+
+Request:
+```json
+{
+  "text": "FastAPI provides automatic OpenAPI documentation and high asynchronous throughput.",
+  "max_keywords": 3,
+  "ngram_range": [1, 2]
+}
+```
+Response (`200 OK`):
+```json
+{
+  "keywords": [
+    {"keyword": "OpenAPI documentation", "score": 0.6842},
+    {"keyword": "FastAPI", "score": 0.6195},
+    {"keyword": "asynchronous throughput", "score": 0.5903}
+  ],
+  "total_candidates": 14,
+  "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+  "latency_ms": 19.7
+}
+```
+</details>
+
+<details>
+<summary><strong>5. Abstractive Summarization — POST /api/v1/nlp/summarization</strong></summary>
+
+Request:
+```json
+{
+  "text": "PostgreSQL 16 introduces performance improvements in query parallelism and logical replication. Teams running async Python services benefit from indexed time-range usage logs and explicit foreign key cascades.",
+  "min_length": 15,
+  "max_length": 60,
+  "do_sample": false
+}
+```
+Response (`200 OK`):
+```json
+{
+  "summary": "PostgreSQL 16 improves query parallelism and logical replication for async Python workloads using indexed logs and explicit cascades.",
+  "original_character_count": 203,
+  "summary_character_count": 131,
+  "chunks_processed": 1,
+  "model_id": "sshleifer/distilbart-cnn-12-6",
+  "latency_ms": 312.5
+}
+```
+</details>
+
+<details>
+<summary><strong>6. Structured Extraction (Ollama) — POST /api/v1/nlp/extraction</strong></summary>
+
+Request:
+```json
+{
+  "text": "Apple Inc. announced Q4 revenue of $89.5 billion in Cupertino.",
+  "fields": [
+    {"name": "company", "type": "string", "required": true},
+    {"name": "revenue", "type": "string", "required": true},
+    {"name": "ceo", "type": "string", "required": false}
+  ],
+  "temperature": 0.0
+}
+```
+Response (`200 OK`):
+```json
+{
+  "extracted_data": {
+    "company": "Apple Inc.",
+    "revenue": "$89.5 billion",
+    "ceo": null
+  },
+  "model": "qwen2.5:3b",
+  "prompt_tokens": 118,
+  "completion_tokens": 24,
+  "total_tokens": 142,
+  "cost_units": 1,
+  "latency_ms": 485.0
+}
+```
+</details>
+
+<details>
+<summary><strong>7. Batch Sentiment with Partial Failure — POST /api/v1/nlp/batch/sentiment</strong></summary>
+
+Request:
 ```json
 {
   "items": [
-    {"id": "review-1", "text": "NLPulse delivers fast and accurate inference."},
-    {"id": "review-2", "text": "   "},
-    {"id": "review-3", "text": "Unexpected timeout during downstream test."}
+    {"id": "doc-1", "text": "NLPulse delivers consistent inference latency."},
+    {"id": "doc-2", "text": "   "}
   ]
 }
 ```
-
-Response (`200 OK`, preserving exact item order and `id`):
-
+Response (`200 OK`):
 ```json
 {
   "capability": "sentiment",
   "execution_mode": "batched_inference",
   "model_id": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
-  "total_items": 3,
-  "succeeded_count": 2,
+  "total_items": 2,
+  "succeeded_count": 1,
   "failed_count": 1,
-  "total_cost_units": 2,
+  "total_cost_units": 1,
   "latency_ms": 14.2,
   "results": [
     {
       "index": 0,
-      "id": "review-1",
+      "id": "doc-1",
       "status": "success",
       "result": {
         "label": "POSITIVE",
@@ -302,7 +440,7 @@ Response (`200 OK`, preserving exact item order and `id`):
     },
     {
       "index": 1,
-      "id": "review-2",
+      "id": "doc-2",
       "status": "error",
       "result": null,
       "error": {
@@ -312,119 +450,68 @@ Response (`200 OK`, preserving exact item order and `id`):
       },
       "cost_units": 0,
       "latency_ms": 0.0
-    },
-    {
-      "index": 2,
-      "id": "review-3",
-      "status": "success",
-      "result": {
-        "label": "NEGATIVE",
-        "confidence": 0.9634,
-        "scores": {"NEGATIVE": 0.9634, "POSITIVE": 0.0366},
-        "model_id": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
-        "latency_ms": 6.8
-      },
-      "error": null,
-      "cost_units": 1,
-      "latency_ms": 6.8
     }
   ]
 }
 ```
-
-### 4. Failure Semantics, Atomic Quota Reservation & Metering
-- **Envelope vs. Item Validation:** Empty (`items: []`) or oversized (`len(items) > BATCH_MAX_SIZE`) requests fail with HTTP `422`. Invalid individual items (blank text, invalid parameter ranges, malformed per-item extraction output, or upstream Ollama errors) fail safely inside `results[i].error` without invalidating healthy items.
-- **Atomic Quota Reservation:** `UsageService.reserve_quota` serializes per-tenant reservation checks for both single requests (`reserve_single_quota`) and batches using `QuotaReservationManager` without holding long-lived PostgreSQL row locks across slow inference, preventing both concurrent TOCTOU quota overruns and PostgreSQL AB-BA deadlocks. Committed usage records atomically settle and release reservations under the same developer lock.
-- **Accurate Usage Settlement:** Only items with `status == "success"` generate persisted `UsageRecord` rows (`endpoint="/api/v1/nlp/batch/<capability>"`) and contribute to `total_cost_units`. Failed or cancelled items incur zero quota consumption and zero cost units, and reservations are always released in `finally` blocks even on `asyncio.CancelledError`.
+</details>
 
 ---
 
-## Getting Started
+## Authentication, Security & Deployment Boundary
 
-### Prerequisites
-
-- **Python 3.12+**
-- **Docker Desktop** (optional for local PostgreSQL 16 container)
-
-### 1. Setup Virtual Environment
-
-```bash
-# Create virtual environment
-python -m venv .venv
-
-# Activate virtual environment
-# Windows (PowerShell):
-.\.venv\Scripts\Activate.ps1
-# Linux / macOS:
-source .venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### 2. Configure Environment
-
-Copy the example environment configuration:
-
-```bash
-cp .env.example .env
-```
-
-### 3. Start Database (Optional)
-
-```bash
-docker compose up -d
-```
-
-### 4. Run Development Server
-
-```bash
-uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Interactive documentation:
-- **Swagger UI:** [http://localhost:8000/docs](http://localhost:8000/docs)
-- **ReDoc:** [http://localhost:8000/redoc](http://localhost:8000/redoc)
+- **API Key Lifecycle:** `POST /api/v1/developers` issues a `nlp_live_...` secret returned once (`32` URL-safe bytes). Only a 16-character prefix and SHA-256 hex digest live in `api_keys`. Child keys (`POST /api/v1/keys`) require explicit non-empty scopes (`min_length=1`) capped to a subset of the caller's scopes; public registration always enforces `tier="free"` (`1000` quota) without `admin`.
+- **Legacy Scope Compatibility:** Granular scopes (`sentiment:read`, `ner:read`, `classification:read`, `keywords:read`, `summarization:read`, `extraction:read`) coexist with `nlp:read`, `analyze:read`, `generate:read` (extraction), `models:read`, `keys:read`, `keys:write`, `usage:read`, `admin`, and `*`.
+- **Rate Limiting & Atomic Quota:** `SlidingWindowRateLimiter` allows `60` requests per `60` seconds per `api_key.key_hash` (`64` lock stripes, `429` + `Retry-After`). Monthly quotas reserve units up front (`reserve_single_quota` or `BatchService`) and release atomically upon database settlement (or via `asyncio.shield` cleanup).
+- **Single-Worker Deployment Boundary:** Both `SlidingWindowRateLimiter` and `QuotaReservationManager` store state in **process memory**. Running single-worker `uvicorn src.main:app` guarantees accurate limits and zero PostgreSQL deadlocks; multi-worker Uvicorn (`--workers > 1`) is **not supported** without adding an external shared state backend (see [ADR-007](docs/adr/007-single-worker-deployment-boundary.md)).
 
 ---
 
-## Running Tests
+## Model Management & Supported Defaults
 
-Run the offline unit and integration test suite with Pytest (smoke tests requiring live Hugging Face downloads are deselected by default in `pyproject.toml`):
+All Hugging Face models start `unloaded`, transition through `loading` -> `ready` on demand, evict the least-recently-used idle model beyond `MODEL_MAX_CACHED=3`, and auto-detect CUDA vs. CPU via `DeviceManager` (`MODEL_DEVICE_PREFERENCE=auto`). Note that hardware detection telemetry is implemented and unit-tested, while PyTorch installed in the current environment is CPU-only (`cuda_available=False`).
 
-```bash
-pytest -v
-```
-
-To opt into real PostgreSQL 16 integration tests (`@pytest.mark.postgres`):
-
-```bash
-NLPULSE_TEST_POSTGRES_URL="postgresql+asyncpg://user:password@localhost:5432/db" pytest -m postgres -v
-```
-
-To opt into live Hugging Face model smoke tests (requires internet access and model downloads):
-
-```bash
-RUN_REAL_MODEL_SMOKE=1 pytest -m smoke -v
-```
-
-### Deployment & Verification Scope (M8)
-
-- **Single-Worker Coordination Boundary:** `SlidingWindowRateLimiter` (`src/core/rate_limiter.py`) and `QuotaReservationManager` (`src/services/usage_service.py`) store synchronization state in process memory. Single-worker `uvicorn src.main:app` execution enforces strict sliding-window rate limits and atomic deadlock-free quota reservations; multi-worker deployment (`--workers > 1`) requires adding an external shared state backend.
-- **Verification Environment Notes:** Alembic migrations, constraints, cascades, and concurrent HTTP batch + single request flows were verified against real PostgreSQL 16.15 (WSL) and SQLite offline fixtures; live Hugging Face downloads, local CUDA kernel execution (CPU-only PyTorch installed in the development environment), and a live Ollama daemon remain optional/unverified runtime targets outside the standard offline suite.
-
----
-
-## Roadmap (M1–M9)
-
-| Milestone | Focus | Main Deliverable | Status |
+| Task | Default Hugging Face Repo ID | Upstream License | Est. VRAM / RAM (`main.py`) |
 | :--- | :--- | :--- | :--- |
-| **M1** | Foundations & Database | Project structure, PostgreSQL, SQLAlchemy, models, migrations | ✅ Complete |
-| **M2** | Security & Authentication | API keys, authentication, scopes, rate limiting, quotas | ✅ Complete |
-| **M3** | Model Lifecycle Management | Model loading, caching, GPU/CPU management, concurrency | ✅ Complete |
-| **M4** | Core NLP | Sentiment analysis, NER, zero-shot classification | ✅ Complete |
-| **M5** | Advanced NLP | Keyword extraction, summarization | ✅ Complete |
-| **M6** | Generative NLP | Ollama integration, structured information extraction | ✅ Complete |
-| **M7** | Batch Processing | Micro-batched inference, bounded worker pools, quota reservation, partial failures | ✅ Complete |
-| **M8** | Integration & Verification | API integration, end-to-end tests, security & PostgreSQL verification | ✅ Complete |
-| **M9** | Documentation & Portfolio | README, architecture docs, ADRs, interview preparation, final release | ⏳ Next |
+| Sentiment Analysis | `distilbert/distilbert-base-uncased-finetuned-sst-2-english` | `apache-2.0` | `270 MB` / `350 MB` |
+| Named Entity Recognition | `dslim/bert-base-NER` | `mit` | `420 MB` / `500 MB` |
+| Zero-Shot Classification | `valhalla/distilbart-mnli-12-1` | Derived from `facebook/bart-large-mnli` (`mit`; no explicit HF YAML tag) | `550 MB` / `700 MB` |
+| Embeddings / Keywords | `sentence-transformers/all-MiniLM-L6-v2` | `apache-2.0` | `90 MB` / `120 MB` |
+| Summarization | `sshleifer/distilbart-cnn-12-6` | `apache-2.0` | `600 MB` / `1200 MB` |
+
+Local generative extraction defaults to Ollama model tag `qwen2.5:3b` via an external Ollama service and never consumes slots in `ModelRegistry`.
+
+---
+
+## Testing & Verification Tiers
+
+NLPulse explicitly separates fast offline tests (SQLite `aiosqlite` + mocked Hugging Face/Ollama pipelines) from real external services:
+
+| Test Tier | Command | Prerequisites | What It Proves |
+| :--- | :--- | :--- | :--- |
+| **Default Offline Suite** | `pytest -v` | None (uses `aiosqlite` and mocks) | API routing, schemas, auth/scopes, rate limits, quota races, LRU eviction, batch partial failures, security headers (`-m "not smoke"` default in `pyproject.toml`) |
+| **Real PostgreSQL 16 Suite** | `NLPULSE_TEST_POSTGRES_URL="postgresql+asyncpg://user:pass@localhost:5432/db" pytest -m postgres -v` | Running PostgreSQL 16 DB migrated to Alembic head | PostgreSQL 16 `CHECK` constraints, rollbacks, `CASCADE` / `SET NULL`, and deadlock-free concurrent batch + single requests |
+| **Live HF Smoke Suite** | `RUN_REAL_MODEL_SMOKE=1 pytest -m smoke -v` | Internet access + HF model download cache | End-to-end weight downloads and real CPU/CUDA forward passes for Sentiment, NER, and Zero-Shot |
+
+*(Default `pytest` skips `@pytest.mark.postgres` unless `NLPULSE_TEST_POSTGRES_URL` is exported and deselects `@pytest.mark.smoke`.)*
+
+---
+
+## Troubleshooting
+
+- **PowerShell activation blocked:** Run `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` before `.\.venv\Scripts\Activate.ps1`.
+- **PostgreSQL connection refused during migrations/startup:** Confirm PostgreSQL 16 is running (`docker compose ps` or local service) and matches `DATABASE_URL` in `.env`.
+- **`503 Local Ollama service unavailable` on extraction routes:** Expected when Ollama is stopped; start `ollama serve` and run `ollama pull qwen2.5:3b` only if using `/api/v1/nlp/extraction` or `/api/v1/nlp/batch/extraction`.
+- **CUDA unavailable (`cuda_available=false` on `/api/v1/hardware`):** Check whether CPU-only PyTorch wheels are installed (`python -c "import torch; print(torch.cuda.is_available())"`) and ensure `MODEL_DEVICE_PREFERENCE` is `auto` or `cpu`.
+
+---
+
+## Limitations & Future Improvements
+
+Current verified limitations:
+1. **Single-Worker Coordination:** Rate limiting (`SlidingWindowRateLimiter`) and in-flight quota tracking (`QuotaReservationManager`) are process-local (`--workers > 1` unsupported).
+2. **Unverified Physical CUDA Execution:** While `DeviceManager` implements CUDA checks and OOM cleanup (tested via mocks), `.venv` carries CPU-only PyTorch, leaving real GPU kernel execution unverified.
+3. **Optional External Services:** Live Hugging Face inference (`-m smoke`), live Ollama extraction calls, and running PostgreSQL inside Docker Desktop remain optional/environment-dependent (PostgreSQL 16 concurrency was verified natively via WSL PostgreSQL 16.15).
+4. **Reserved Config Flag:** `MODEL_ENABLE_WARMUP` exists in `Settings` / `.env.example` as a reserved flag and does not currently preload models at startup.
+
+Potential future enhancements (not yet implemented): Redis-backed distributed rate limiting and quota leases for horizontal scaling, GPU-stage CI smoke execution, `/ready` warmup lifecycle support, and asynchronous queued batch jobs (`202 Accepted`) for large document workloads.
