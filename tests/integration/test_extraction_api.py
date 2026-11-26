@@ -243,3 +243,30 @@ async def test_extraction_api_ollama_error_502(async_client: AsyncClient, regist
         json={"text": "Sample text", "fields": [{"name": "item"}]},
     )
     assert response.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_extraction_api_validation_failure_redacts_sensitive_llm_output(
+    async_client: AsyncClient, registered_dev_headers: tuple, caplog
+):
+    """Verify HTTP 422 validation failures never echo raw model output or document PII in body/logs."""
+    headers, _ = registered_dev_headers
+    secret_pii = "SENSITIVE_SSN_999_00_1111"
+    app.state.ollama_client.generate.return_value = {
+        "response": f"Malformed output leaking {secret_pii}",
+        "prompt_tokens": 30,
+        "completion_tokens": 12,
+        "total_tokens": 42,
+        "total_duration_ns": 100000000,
+        "model": "qwen2.5:3b",
+    }
+
+    caplog.clear()
+    response = await async_client.post(
+        "/api/v1/nlp/extraction",
+        headers=headers,
+        json={"text": f"Record for {secret_pii}", "fields": [{"name": "item"}]},
+    )
+    assert response.status_code == 422
+    assert secret_pii not in response.text
+    assert secret_pii not in caplog.text

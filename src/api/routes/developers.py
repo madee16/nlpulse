@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import get_current_developer, get_db
+from src.api.deps import check_registration_rate_limit, get_current_developer, get_db
 from src.models.developer import Developer
 from src.schemas.developer import (
     DeveloperCreate,
@@ -23,8 +23,10 @@ router = APIRouter(prefix="/developers", tags=["Developers"])
     summary="Register a new developer",
     description=(
         "Registers a developer account on the free tier and automatically issues the initial "
-        "bootstrap API key. The plaintext API key is returned strictly once in this response."
+        "bootstrap API key. Protected by process-local per-IP admission rate limiting. "
+        "The plaintext API key is returned strictly once in this response."
     ),
+    dependencies=[Depends(check_registration_rate_limit)],
 )
 async def register_developer(
     payload: DeveloperCreate,

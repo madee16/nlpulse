@@ -228,3 +228,118 @@ async def test_quota_exhaustion_http(async_client: AsyncClient):
     res_blocked = await async_client.get("/api/v1/protected/sentiment", headers=headers)
     assert res_blocked.status_code == 429
     assert "quota" in res_blocked.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_registration_rate_limit_enforced_and_no_db_leak(async_client: AsyncClient, db_session, monkeypatch):
+    """Verify public developer registration enforces per-IP 429 limits without persisting rejected rows."""
+    from sqlalchemy import func, select
+    from src.api import deps
+    from src.core.config import Settings
+    from src.core.rate_limiter import SlidingWindowRateLimiter
+    from src.models.api_key import APIKey
+    from src.models.developer import Developer
+
+    test_reg_limiter = SlidingWindowRateLimiter(default_max_requests=2, default_window_seconds=60)
+    orig_limiter = deps.registration_rate_limiter
+    deps.registration_rate_limiter = test_reg_limiter
+    monkeypatch.setattr(
+        deps,
+        "get_settings",
+        lambda: Settings(REGISTRATION_RATE_LIMIT_REQUESTS=2, REGISTRATION_RATE_LIMIT_WINDOW_SECONDS=60),
+    )
+    try:
+        r1 = await async_client.post("/api/v1/developers", json={"email": "reg_rl_1@example.com", "name": "Reg One"})
+        r2 = await async_client.post("/api/v1/developers", json={"email": "reg_rl_2@example.com", "name": "Reg Two"})
+        assert r1.status_code == 201
+        assert r2.status_code == 201
+
+        # Spoofed X-Forwarded-For must NOT bypass admission control when peer is untrusted
+        r3 = await async_client.post(
+            "/api/v1/developers",
+            headers={"X-Forwarded-For": "198.51.100.77"},
+            json={"email": "reg_rl_3@example.com", "name": "Reg Three"},
+        )
+        assert r3.status_code == 429
+        assert "retry-after" in r3.headers
+
+        dev_count = (await db_session.execute(select(func.count(Developer.id)))).scalar_one()
+        key_count = (await db_session.execute(select(func.count(APIKey.id)))).scalar_one()
+        assert dev_count == 2
+        assert key_count == 2
+    finally:
+        deps.registration_rate_limiter = orig_limiter
+
+
+@pytest.mark.asyncio
+async def test_registration_trusted_proxy_and_independent_client_ips():
+    """Verify right-most untrusted IP extraction under configured TRUSTED_PROXY_IPS vs untrusted peers."""
+    from starlette.requests import Request
+    from src.api.deps import resolve_client_ip
+
+    def _make_request(peer_host: str, xff: str | None = None) -> Request:
+        headers = [(b"x-forwarded-for", xff.encode())] if xff is not None else []
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/developers",
+            "headers": headers,
+            "client": (peer_host, 12345),
+        }
+        return Request(scope)
+
+    # Untrusted peer cannot spoof X-Forwarded-For
+    untrusted_req = _make_request("203.0.113.9", "198.51.100.50")
+    assert resolve_client_ip(untrusted_req, trusted_proxies=["10.0.0.1"]) == "203.0.113.9"
+
+    # Trusted proxy uses right-most untrusted address (ignores client-prepended spoofed IP)
+    trusted_req = _make_request("10.0.0.1", "198.51.100.99, 192.0.2.44")
+    assert resolve_client_ip(trusted_req, trusted_proxies=["10.0.0.0/8"]) == "192.0.2.44"
+
+    # Chained trusted proxies peel off cleanly from the right
+    chained_req = _make_request("10.0.0.1", "198.51.100.1, 192.0.2.55, 10.0.0.2")
+    assert resolve_client_ip(chained_req, trusted_proxies=["10.0.0.0/8"]) == "192.0.2.55"
+
+
+@pytest.mark.asyncio
+async def test_registration_rate_limit_isolates_independent_client_ips(async_client: AsyncClient, monkeypatch):
+    """Verify rate limits apply independently per client IP when forwarded through a trusted proxy."""
+    from src.api import deps
+    from src.core.config import Settings
+    from src.core.rate_limiter import SlidingWindowRateLimiter
+
+    test_reg_limiter = SlidingWindowRateLimiter(default_max_requests=1, default_window_seconds=60)
+    orig_limiter = deps.registration_rate_limiter
+    deps.registration_rate_limiter = test_reg_limiter
+    monkeypatch.setattr(
+        deps,
+        "get_settings",
+        lambda: Settings(
+            REGISTRATION_RATE_LIMIT_REQUESTS=1,
+            REGISTRATION_RATE_LIMIT_WINDOW_SECONDS=60,
+            TRUSTED_PROXY_IPS=["127.0.0.1"],
+        ),
+    )
+    try:
+        r_ip1_ok = await async_client.post(
+            "/api/v1/developers",
+            headers={"X-Forwarded-For": "198.51.100.10"},
+            json={"email": "ip1_ok@example.com", "name": "IP1 First"},
+        )
+        assert r_ip1_ok.status_code == 201
+
+        r_ip1_blocked = await async_client.post(
+            "/api/v1/developers",
+            headers={"X-Forwarded-For": "198.51.100.10"},
+            json={"email": "ip1_blocked@example.com", "name": "IP1 Second"},
+        )
+        assert r_ip1_blocked.status_code == 429
+
+        r_ip2_ok = await async_client.post(
+            "/api/v1/developers",
+            headers={"X-Forwarded-For": "198.51.100.20"},
+            json={"email": "ip2_ok@example.com", "name": "IP2 First"},
+        )
+        assert r_ip2_ok.status_code == 201
+    finally:
+        deps.registration_rate_limiter = orig_limiter

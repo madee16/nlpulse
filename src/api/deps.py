@@ -1,19 +1,21 @@
 """FastAPI dependencies for database access, authentication, scopes, and quota enforcement."""
 
 import asyncio
-from typing import AsyncGenerator, List, Optional
+import ipaddress
+from typing import AsyncGenerator, List, Optional, Sequence
 
 from fastapi import Depends, Header, HTTPException, Request, Security
 from fastapi.security.api_key import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.config import get_settings
 from src.core.exceptions import (
     AuthenticationError,
     PermissionDeniedError,
     QuotaExceededError,
     RateLimitExceededError,
 )
-from src.core.rate_limiter import rate_limiter
+from src.core.rate_limiter import rate_limiter, registration_rate_limiter
 from src.db.session import get_db
 from src.models.api_key import APIKey
 from src.models.developer import Developer
@@ -110,6 +112,69 @@ async def check_rate_limit(
     is_allowed, retry_after = await rate_limiter.check(api_key.key_hash)
     if not is_allowed:
         raise RateLimitExceededError(retry_after=retry_after)
+
+
+def _ip_matches_trusted_proxies(ip_str: str, trusted_proxies: Sequence[str]) -> bool:
+    """Return True if ip_str belongs to any configured trusted proxy IP or CIDR."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+
+    for entry in trusted_proxies:
+        candidate = entry.strip()
+        if not candidate:
+            continue
+        try:
+            if "/" in candidate:
+                if addr in ipaddress.ip_network(candidate, strict=False):
+                    return True
+            elif addr == ipaddress.ip_address(candidate):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def resolve_client_ip(request: Request, trusted_proxies: Optional[Sequence[str]] = None) -> str:
+    """Resolve client IP safely without trusting arbitrary X-Forwarded-For headers."""
+    peer_ip = request.client.host if request.client and request.client.host else "unknown"
+    proxies = list(trusted_proxies) if trusted_proxies is not None else list(get_settings().TRUSTED_PROXY_IPS)
+    if not proxies or not _ip_matches_trusted_proxies(peer_ip, proxies):
+        return peer_ip
+
+    raw_xff = request.headers.get("x-forwarded-for", "")
+    if not raw_xff:
+        return peer_ip
+
+    # Walk right-to-left across proxies so client-injected leftmost XFF entries cannot spoof identity.
+    for part in reversed(raw_xff.split(",")):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if not _ip_matches_trusted_proxies(candidate, proxies):
+            return candidate
+    return peer_ip
+
+
+async def check_registration_rate_limit(request: Request) -> None:
+    """Apply process-local IP admission control on unauthenticated developer registration."""
+    cfg = get_settings()
+    client_ip = resolve_client_ip(request, cfg.TRUSTED_PROXY_IPS)
+    is_allowed, retry_after = await registration_rate_limiter.check(
+        f"reg:{client_ip}",
+        max_requests=cfg.REGISTRATION_RATE_LIMIT_REQUESTS,
+        window_seconds=cfg.REGISTRATION_RATE_LIMIT_WINDOW_SECONDS,
+    )
+    if not is_allowed:
+        raise RateLimitExceededError(
+            message="Too many registration attempts. Please try again later.",
+            retry_after=retry_after,
+        )
 
 
 def get_model_registry(request: Request) -> ModelRegistry:

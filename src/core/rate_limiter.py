@@ -21,8 +21,7 @@ Architecture & Concurrency Notes:
 
 import asyncio
 import time
-from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 NUM_LOCK_STRIPES = 64
 
@@ -43,9 +42,22 @@ class SlidingWindowRateLimiter:
         # Striped lock pool to reduce contention across distinct keys
         self._locks = [asyncio.Lock() for _ in range(NUM_LOCK_STRIPES)]
         self._global_lock = asyncio.Lock()
+        self._locks_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _ensure_loop_locks(self) -> None:
+        """Rebind lock primitives when accessed from a different running event loop."""
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._locks_loop is not running_loop:
+            self._locks = [asyncio.Lock() for _ in range(NUM_LOCK_STRIPES)]
+            self._global_lock = asyncio.Lock()
+            self._locks_loop = running_loop
 
     def _get_lock(self, key: str) -> asyncio.Lock:
         """Select a striped lock based on the stable hash of the key."""
+        self._ensure_loop_locks()
         stripe_idx = abs(hash(key)) % NUM_LOCK_STRIPES
         return self._locks[stripe_idx]
 
@@ -94,6 +106,7 @@ class SlidingWindowRateLimiter:
 
     async def prune_stale_entries(self, window_seconds: int | None = None) -> int:
         """Evict all keys that have zero active timestamps in the rolling window."""
+        self._ensure_loop_locks()
         window = window_seconds or self.default_window_seconds
         cutoff = time.time() - window
 
@@ -114,10 +127,12 @@ class SlidingWindowRateLimiter:
         return evicted_count
 
     async def reset(self) -> None:
-        """Clear all rate limit history."""
+        """Clear all rate limit history and bind locks to the current event loop."""
+        self._ensure_loop_locks()
         async with self._global_lock:
             self._history.clear()
 
 
-# Global in-memory rate limiter singleton
+# Global in-memory rate limiter singletons (process-local)
 rate_limiter = SlidingWindowRateLimiter()
+registration_rate_limiter = SlidingWindowRateLimiter()

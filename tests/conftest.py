@@ -14,7 +14,21 @@ from sqlalchemy.pool import StaticPool
 
 from src.db.base import Base
 from src.db.session import get_db
+from src.core.rate_limiter import rate_limiter, registration_rate_limiter
 from src.main import app
+from src.services.usage_service import quota_reservation_manager
+
+
+@pytest.fixture(autouse=True)
+async def _reset_registration_rate_limiter():
+    """Keep process-local rate limit and quota reservation singletons isolated across tests."""
+    await registration_rate_limiter.reset()
+    await rate_limiter.reset()
+    await quota_reservation_manager.reset()
+    yield
+    await registration_rate_limiter.reset()
+    await rate_limiter.reset()
+    await quota_reservation_manager.reset()
 
 
 @event.listens_for(Engine, "connect")

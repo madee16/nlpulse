@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     BATCH_INFERENCE_CHUNK_SIZE: int = 8
     BATCH_EXTRACTION_CONCURRENCY: int = 2
 
+    # Public Registration Admission Control
+    REGISTRATION_RATE_LIMIT_REQUESTS: int = 5
+    REGISTRATION_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    TRUSTED_PROXY_IPS: Union[List[str], str] = []
+
     # CORS
     CORS_ORIGINS: Union[List[str], str] = ["*"]
 
@@ -87,15 +92,17 @@ class Settings(BaseSettings):
         db = data.get("POSTGRES_DB", "nlpulse")
         return f"postgresql+asyncpg://{user}:{password}@{server}:{port}/{db}"
 
-    @field_validator("CORS_ORIGINS", mode="before")
+    @field_validator("CORS_ORIGINS", "TRUSTED_PROXY_IPS", mode="before")
     @classmethod
-    def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
-        """Parse CORS origins if provided as a comma-separated string or list."""
-        if isinstance(v, str) and not v.startswith("["):
+    def assemble_string_list(cls, v: Union[str, List[str]]) -> List[str]:
+        """Parse string-list settings provided as a comma-separated string or JSON list."""
+        if v is None or v == "":
+            return []
+        if isinstance(v, str) and not v.lstrip().startswith("["):
             return [i.strip() for i in v.split(",") if i.strip()]
         elif isinstance(v, (list, str)):
             return v
-        raise ValueError(f"Invalid CORS_ORIGINS format: {v}")
+        raise ValueError(f"Invalid list format: {v}")
 
 
 @lru_cache

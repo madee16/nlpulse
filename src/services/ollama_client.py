@@ -168,12 +168,12 @@ class OllamaClient:
             raise OllamaInferenceError(f"Ollama endpoint not found (HTTP 404): {body}")
 
         if resp.status_code != 200:
-            raise OllamaInferenceError(f"Ollama returned HTTP {resp.status_code}: {resp.text[:300]}")
+            raise OllamaInferenceError(f"Ollama returned HTTP {resp.status_code}.")
 
         try:
             data = resp.json()
         except Exception as exc:
-            raise OllamaInferenceError(f"Ollama returned non-JSON response payload: {resp.text[:300]}") from exc
+            raise OllamaInferenceError("Ollama returned a non-JSON response payload.") from exc
 
         raw_response = data.get("response", "")
         prompt_tokens = int(data.get("prompt_eval_count", 0))

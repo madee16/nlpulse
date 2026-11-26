@@ -9,6 +9,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 import uuid
 
+from jsonschema import Draft202012Validator, FormatChecker, SchemaError as JSONSchemaError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import get_settings
@@ -39,6 +40,7 @@ _VALID_SCHEMA_TYPES = frozenset({"string", "number", "integer", "boolean", "arra
 _ALWAYS_PLACEHOLDERS = frozenset({"", "null"})
 _CONTEXTUAL_PLACEHOLDERS = frozenset({"none", "n/a", "unknown", "not specified", "not mentioned"})
 _NUMERIC_PATTERN = re.compile(r"^\s*[$€£¥]?\s*([+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*%?\s*$")
+_FORMAT_CHECKER = FormatChecker()
 
 
 class ExtractionService:
@@ -128,6 +130,13 @@ class ExtractionService:
             props = schema_definition.get("properties")
             if not props:
                 raise ExtractionValidationError("schema_definition must define at least one property under 'properties'.")
+            try:
+                Draft202012Validator.check_schema(schema_definition)
+            except JSONSchemaError as exc:
+                raise ExtractionValidationError(
+                    "Invalid JSON Schema specification.",
+                    details={"validation_category": "invalid_schema", "validator": str(exc.validator)},
+                ) from exc
             return schema_definition
 
         if not fields:
@@ -158,7 +167,7 @@ class ExtractionService:
                     f"Unsupported field type '{field_type}' for field '{name}'."
                 )
 
-            prop_def: Dict[str, Any] = {"type": field_type}
+            prop_def: Dict[str, Any] = {"type": [field_type, "null"]}
             if desc:
                 prop_def["description"] = desc
             properties[name] = prop_def
@@ -168,11 +177,14 @@ class ExtractionService:
         if not properties:
             raise ExtractionValidationError("At least one valid non-empty field must be provided.")
 
-        return {
+        built_schema = {
             "type": "object",
             "properties": properties,
             "required": required,
+            "x-nlpulse-fields-mode": True,
         }
+        Draft202012Validator.check_schema(built_schema)
+        return built_schema
 
     def _clean_markdown_json(self, raw_text: str) -> str:
         """Strip markdown fences, leading/trailing whitespace, or commentary around JSON."""
@@ -260,31 +272,35 @@ class ExtractionService:
         result: Any
         if expected_type == "object":
             if not isinstance(value, dict):
-                return None
-            result = self._sanitize_object(value, prop_spec, source_text, prefix=field_path)
+                return value
+            result = self._sanitize_object(
+                value, prop_spec, source_text, prefix=field_path, fill_missing_nullable=False
+            )
 
         elif expected_type == "array":
-            raw_items = value if isinstance(value, list) else [value]
+            if not isinstance(value, list):
+                return value
             items_spec = prop_spec.get("items")
             if isinstance(items_spec, dict):
-                item_type, _ = self._resolve_schema_types(items_spec, path=f"{field_path}[]")
+                item_type, item_allows_null = self._resolve_schema_types(items_spec, path=f"{field_path}[]")
                 sanitized_items = []
-                for idx, item in enumerate(raw_items):
+                for idx, item in enumerate(value):
                     cleaned_item = self._sanitize_value(
                         item, items_spec, source_text, field_path=f"{field_path}[{idx}]"
                     )
-                    if cleaned_item is None and item_type != "object":
+                    if cleaned_item is None and not item_allows_null and item_type != "object":
                         continue
                     sanitized_items.append(cleaned_item)
                 result = sanitized_items
             else:
                 result = [
-                    item for item in raw_items
+                    item for item in value
                     if not (isinstance(item, str) and self._is_placeholder_string(item, "string", source_text))
                 ]
 
         elif expected_type in {"number", "integer"}:
-            result = self._coerce_number(value, expected_type)
+            coerced = self._coerce_number(value, expected_type)
+            result = coerced if coerced is not None else value
 
         elif expected_type == "boolean":
             if isinstance(value, bool):
@@ -296,11 +312,11 @@ class ExtractionService:
                 elif norm in {"false", "no", "0"}:
                     result = False
                 else:
-                    result = None
+                    result = value
             elif isinstance(value, int) and value in (0, 1):
                 result = bool(value)
             else:
-                result = None
+                result = value
 
         else:
             # String or untyped scalar
@@ -309,20 +325,18 @@ class ExtractionService:
             elif isinstance(value, (int, float)) and not isinstance(value, bool):
                 result = str(value)
             else:
-                result = None
+                result = value
 
-        # Enforce enum constraint if provided
+        # Preserve exact case for case-insensitive enum matches when valid
         if result is not None and isinstance(prop_spec.get("enum"), list):
             allowed = prop_spec["enum"]
-            if result not in allowed:
-                if isinstance(result, str):
-                    ci_match = next(
-                        (opt for opt in allowed if isinstance(opt, str) and opt.lower() == result.lower()),
-                        None,
-                    )
+            if result not in allowed and isinstance(result, str):
+                ci_match = next(
+                    (opt for opt in allowed if isinstance(opt, str) and opt.lower() == result.lower()),
+                    None,
+                )
+                if ci_match is not None:
                     result = ci_match
-                else:
-                    result = None
 
         return result
 
@@ -332,6 +346,7 @@ class ExtractionService:
         schema_node: Dict[str, Any],
         source_text: str,
         prefix: str = "$",
+        fill_missing_nullable: bool = False,
     ) -> Dict[str, Any]:
         """Sanitize an object dict recursively against a JSON Schema object node."""
         properties = schema_node.get("properties", {})
@@ -340,12 +355,15 @@ class ExtractionService:
 
         if isinstance(properties, dict):
             for prop_name, prop_spec in properties.items():
-                sanitized[prop_name] = self._sanitize_value(
-                    data.get(prop_name),
-                    prop_spec,
-                    source_text,
-                    field_path=f"{prefix}.{prop_name}",
-                )
+                if prop_name in data:
+                    sanitized[prop_name] = self._sanitize_value(
+                        data[prop_name],
+                        prop_spec,
+                        source_text,
+                        field_path=f"{prefix}.{prop_name}",
+                    )
+                elif fill_missing_nullable:
+                    sanitized[prop_name] = None
 
         if additional is False:
             return sanitized
@@ -361,30 +379,69 @@ class ExtractionService:
 
         return sanitized
 
+    def _validate_against_json_schema(self, payload: Dict[str, Any], schema: Dict[str, Any]) -> None:
+        """Enforce JSON Schema Draft 2020-12 constraints without exposing model-generated values."""
+        validator_schema = {k: v for k, v in schema.items() if k != "x-nlpulse-fields-mode"}
+        validator = Draft202012Validator(validator_schema, format_checker=_FORMAT_CHECKER)
+        errors = sorted(validator.iter_errors(payload), key=lambda err: [str(p) for p in err.absolute_path])
+        if not errors:
+            return
+
+        first = errors[0]
+        path = "$" + "".join(
+            f"[{p}]" if isinstance(p, int) else f".{p}" for p in first.absolute_path
+        )
+        rule = str(first.validator)
+        logger.warning(
+            "Extraction output failed JSON Schema validation",
+            extra={"validation_rule": rule, "schema_path": path, "error_count": len(errors)},
+        )
+        raise ExtractionValidationError(
+            f"Extracted output violated JSON Schema constraint '{rule}' at '{path}'.",
+            details={
+                "validation_category": "schema_constraint",
+                "schema_path": path,
+                "constraint": rule,
+                "error_count": len(errors),
+            },
+        )
+
     def _validate_and_sanitize_payload(
         self,
         raw_json_str: str,
         schema: Dict[str, Any],
         source_text: str,
     ) -> Dict[str, Any]:
-        """Parse raw model output into JSON and enforce schema types, null defaults, and grounding."""
+        """Parse raw model output into JSON, sanitize placeholders, and enforce JSON Schema."""
         cleaned_str = self._clean_markdown_json(raw_json_str)
 
         try:
             data = json.loads(cleaned_str)
         except json.JSONDecodeError as exc:
-            logger.warning(f"Ollama generated malformed JSON: {cleaned_str}")
+            logger.warning(
+                "Generative extraction failed to produce valid JSON",
+                extra={"error_type": type(exc).__name__, "output_length": len(raw_json_str)},
+            )
             raise ExtractionValidationError(
-                f"Generative model failed to produce valid JSON: {exc.msg}",
-                details={"raw_output": raw_json_str[:500]},
+                "Generative model failed to produce valid JSON output.",
+                details={"validation_category": "json_decode_error"},
             ) from exc
 
         if not isinstance(data, dict):
             raise ExtractionValidationError(
-                f"Extracted JSON must be a dictionary object, received {type(data).__name__}."
+                f"Extracted JSON must be a dictionary object, received {type(data).__name__}.",
+                details={"validation_category": "root_type_mismatch"},
             )
 
-        return self._sanitize_object(data, schema, source_text, prefix="$")
+        sanitized = self._sanitize_object(
+            data,
+            schema,
+            source_text,
+            prefix="$",
+            fill_missing_nullable=bool(schema.get("x-nlpulse-fields-mode", False)),
+        )
+        self._validate_against_json_schema(sanitized, schema)
+        return sanitized
 
     def validate_and_prepare(
         self,
@@ -415,9 +472,10 @@ class ExtractionService:
         target_schema = self._normalize_schema(schema_definition=schema_definition, fields=fields)
         target_model = model or settings.OLLAMA_MODEL
 
+        prompt_schema = {k: v for k, v in target_schema.items() if k != "x-nlpulse-fields-mode"}
         user_prompt_parts = [
             "TARGET JSON SCHEMA:",
-            json.dumps(target_schema, indent=2),
+            json.dumps(prompt_schema, indent=2),
             "",
         ]
         if instructions and instructions.strip():

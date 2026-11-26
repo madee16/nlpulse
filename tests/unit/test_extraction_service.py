@@ -256,13 +256,13 @@ async def test_extraction_nested_schema_and_union_types(mock_session, mock_ollam
         "response": json.dumps({
             "company": {
                 "name": "Acme Corp",
-                "employees": True,
+                "employees": None,
                 "founded_year": 1998.0,
                 "headquarters": {"city": "Austin", "postal_code": "N/A"},
             },
             "executives": [
                 {"name": "Jane Doe", "tenure_years": "7", "active": "false"},
-                {"name": "John Smith", "tenure_years": "unknown", "active": "invalid"},
+                {"name": "John Smith", "tenure_years": "unknown", "active": "N/A"},
             ],
             "tags": ["enterprise", "N/A", "saas"],
             "nullable_count": "1,250",
@@ -287,13 +287,13 @@ async def test_extraction_nested_schema_and_union_types(mock_session, mock_ollam
                 "additionalProperties": False,
                 "properties": {
                     "name": {"type": "string"},
-                    "employees": {"type": "integer"},
+                    "employees": {"type": ["integer", "null"]},
                     "founded_year": {"type": "integer"},
                     "headquarters": {
                         "type": "object",
                         "properties": {
                             "city": {"type": "string"},
-                            "postal_code": {"type": "string"},
+                            "postal_code": {"type": ["string", "null"]},
                         },
                     },
                 },
@@ -304,8 +304,8 @@ async def test_extraction_nested_schema_and_union_types(mock_session, mock_ollam
                     "type": "object",
                     "properties": {
                         "name": {"type": "string"},
-                        "tenure_years": {"type": "integer"},
-                        "active": {"type": "boolean"},
+                        "tenure_years": {"type": ["integer", "null"]},
+                        "active": {"type": ["boolean", "null"]},
                     },
                 },
             },
@@ -323,7 +323,6 @@ async def test_extraction_nested_schema_and_union_types(mock_session, mock_ollam
     data = result["extracted_data"]
     assert "fabricated_extra" not in data
     assert data["company"]["name"] == "Acme Corp"
-    # bool True must NOT coerce to integer 1
     assert data["company"]["employees"] is None
     assert data["company"]["founded_year"] == 1998
     assert isinstance(data["company"]["founded_year"], int)
@@ -355,4 +354,132 @@ async def test_extraction_rejects_malformed_schema_definition(mock_session, mock
             schema_definition={"type": "string"},
         )
 
+    with pytest.raises(ExtractionValidationError):
+        await service.extract_structured_data(
+            text="Valid text",
+            developer_id=dev_id,
+            schema_definition={"type": "object", "properties": {"age": {"type": "integer", "minimum": "invalid"}}},
+        )
+
     mock_ollama_client.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_extraction_enforces_json_schema_constraints_and_redacts_sensitive_data(
+    mock_session, mock_ollama_client, caplog
+):
+    """Verify Draft 2020-12 constraints (required, types, min/max, length, pattern, format, enum, nested) and redaction."""
+    service = ExtractionService(session=mock_session, ollama_client=mock_ollama_client)
+    dev_id = uuid.uuid4()
+
+    def _mock_resp(payload: dict | str):
+        return {
+            "response": payload if isinstance(payload, str) else json.dumps(payload),
+            "prompt_tokens": 50,
+            "completion_tokens": 20,
+            "total_tokens": 70,
+            "total_duration_ns": 100000000,
+            "model": "qwen2.5:3b",
+        }
+
+    strict_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["company", "code", "count", "contact_email", "status"],
+        "properties": {
+            "company": {"type": "string", "minLength": 2, "maxLength": 40},
+            "code": {"type": "string", "pattern": "^[A-Z]{3}-[0-9]{2}$"},
+            "count": {"type": "integer", "minimum": 1, "maximum": 100},
+            "contact_email": {"type": "string", "format": "email"},
+            "event_date": {"type": ["string", "null"], "format": "date"},
+            "status": {"type": "string", "enum": ["active", "paused"]},
+            "nested": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {"id": {"type": "string", "format": "uuid"}},
+            },
+            "scores": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            },
+        },
+    }
+
+    # 1. Valid structured extraction passes cleanly (including nullable event_date=None)
+    mock_ollama_client.generate.return_value = _mock_resp({
+        "company": "Acme Corp",
+        "code": "ACM-42",
+        "count": 10,
+        "contact_email": "ops@acme.example",
+        "event_date": None,
+        "status": "active",
+        "nested": {"id": "123e4567-e89b-12d3-a456-426614174000"},
+        "scores": [0.85],
+    })
+    ok = await service.extract_structured_data(
+        text="Acme Corp ACM-42 has 10 active units, contact ops@acme.example, id 123e4567-e89b-12d3-a456-426614174000, score 0.85.",
+        developer_id=dev_id,
+        schema_definition=strict_schema,
+    )
+    assert ok["extracted_data"]["count"] == 10
+    assert ok["extracted_data"]["event_date"] is None
+
+    # 2. Invalid payloads covering all schema rules MUST fail 422 and NEVER leak canary values
+    canary = "SENSITIVE_PII_TOKEN_XYZ_987"
+    invalid_cases = [
+        # Missing required field
+        {"company": "Acme Corp", "code": "ACM-42", "count": 10, "contact_email": "ops@acme.example"},
+        # Incorrect primitive type (bool for integer must reject rather than silently turn None)
+        {"company": "Acme Corp", "code": "ACM-42", "count": True, "contact_email": "ops@acme.example", "status": "active"},
+        # Numeric minimum / maximum
+        {"company": "Acme Corp", "code": "ACM-42", "count": 0, "contact_email": "ops@acme.example", "status": "active"},
+        {"company": "Acme Corp", "code": "ACM-42", "count": 999, "contact_email": "ops@acme.example", "status": "active"},
+        # String minLength / maxLength
+        {"company": "A", "code": "ACM-42", "count": 5, "contact_email": "ops@acme.example", "status": "active"},
+        {"company": "X" * 45 + canary, "code": "ACM-42", "count": 5, "contact_email": "ops@acme.example", "status": "active"},
+        # String pattern
+        {"company": "Acme Corp", "code": f"bad-{canary}", "count": 5, "contact_email": "ops@acme.example", "status": "active"},
+        # Format violation (email / date / uuid)
+        {"company": "Acme Corp", "code": "ACM-42", "count": 5, "contact_email": f"not-an-email-{canary}", "status": "active"},
+        {"company": "Acme Corp", "code": "ACM-42", "count": 5, "contact_email": "ops@acme.example", "event_date": "2026-99-99", "status": "active"},
+        # Enum violation
+        {"company": "Acme Corp", "code": "ACM-42", "count": 5, "contact_email": "ops@acme.example", "status": f"bad_{canary}"},
+        # Nested object & array minItems/bounds violations
+        {
+            "company": "Acme Corp",
+            "code": "ACM-42",
+            "count": 5,
+            "contact_email": "ops@acme.example",
+            "status": "active",
+            "nested": {"id": "not-a-uuid"},
+            "scores": [1.5],
+        },
+        # Placeholder on non-nullable required string
+        {"company": "unknown", "code": "ACM-42", "count": 5, "contact_email": "ops@acme.example", "status": "active"},
+    ]
+
+    caplog.clear()
+    for case in invalid_cases:
+        mock_ollama_client.generate.return_value = _mock_resp(case)
+        with pytest.raises(ExtractionValidationError) as exc_info:
+            await service.extract_structured_data(
+                text=f"Source containing {canary}",
+                developer_id=dev_id,
+                schema_definition=strict_schema,
+            )
+        assert exc_info.value.status_code == 422
+        assert canary not in exc_info.value.message
+        assert canary not in json.dumps(exc_info.value.details or {})
+
+    # 3. Malformed JSON must never expose raw output in logs or error details
+    mock_ollama_client.generate.return_value = _mock_resp(f"not valid json {canary}")
+    with pytest.raises(ExtractionValidationError) as malformed_exc:
+        await service.extract_structured_data(
+            text="Valid text",
+            developer_id=dev_id,
+            schema_definition=strict_schema,
+        )
+    assert canary not in malformed_exc.value.message
+    assert canary not in json.dumps(malformed_exc.value.details or {})
+    assert canary not in caplog.text

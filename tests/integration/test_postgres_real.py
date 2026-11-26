@@ -8,9 +8,12 @@ import os
 import time
 import uuid
 
+from alembic import command
+from alembic.config import Config
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -32,6 +35,27 @@ from src.services.usage_service import quota_reservation_manager
 settings = get_settings()
 PG_URL = os.getenv("NLPULSE_TEST_POSTGRES_URL")
 
+_FORBIDDEN_DESTRUCTIVE_DB_NAMES = frozenset({"postgres", "template0", "template1", "nlpulse", "prod", "production"})
+
+
+def validate_safe_postgres_migration_url(url: str) -> str:
+    """Validate PostgreSQL test URL targets a dedicated test DB before running downgrade/upgrade."""
+    parsed = make_url(url)
+    if not parsed.drivername.startswith("postgresql"):
+        raise ValueError(f"Expected a PostgreSQL URL, got driver '{parsed.drivername}'.")
+    db_name = (parsed.database or "").strip()
+    lowered = db_name.lower()
+    if not lowered or lowered in _FORBIDDEN_DESTRUCTIVE_DB_NAMES:
+        raise ValueError(f"Refusing destructive Alembic test against protected database '{db_name}'.")
+    allow_any = os.getenv("NLPULSE_ALLOW_DESTRUCTIVE_PG_MIGRATION_TEST") == "1"
+    if not allow_any and not (lowered.endswith("_test") or lowered.startswith("test_")):
+        raise ValueError(
+            f"Database '{db_name}' must end with '_test' or start with 'test_' "
+            "(or set NLPULSE_ALLOW_DESTRUCTIVE_PG_MIGRATION_TEST=1)."
+        )
+    return db_name
+
+
 pytestmark = [
     pytest.mark.postgres,
     pytest.mark.skipif(
@@ -39,6 +63,50 @@ pytestmark = [
         reason="Skipping real PostgreSQL tests: NLPULSE_TEST_POSTGRES_URL not set",
     ),
 ]
+
+
+def test_postgres_alembic_upgrade_check_and_downgrade_cycle():
+    """Verify Alembic upgrade head, alembic check, downgrade base reset, and re-upgrade on PostgreSQL 16."""
+    assert PG_URL is not None
+    validate_safe_postgres_migration_url(PG_URL)
+
+    has_prev_url = "DATABASE_URL" in os.environ
+    prev_db_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = PG_URL
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    alembic_cfg = Config(os.path.join(repo_root, "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", os.path.join(repo_root, "migrations"))
+
+    async def _list_public_tables() -> set[str]:
+        eng = create_async_engine(PG_URL, echo=False)
+        try:
+            async with eng.connect() as conn:
+                res = await conn.execute(
+                    text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+                )
+                return {row[0] for row in res.fetchall()}
+        finally:
+            await eng.dispose()
+
+    try:
+        command.upgrade(alembic_cfg, "head")
+        command.check(alembic_cfg)
+        tables_after_upgrade = asyncio.run(_list_public_tables())
+        assert {"developers", "api_keys", "usage_records"}.issubset(tables_after_upgrade)
+
+        command.downgrade(alembic_cfg, "base")
+        tables_after_downgrade = asyncio.run(_list_public_tables())
+        assert not {"developers", "api_keys", "usage_records"} & tables_after_downgrade
+
+        # Restore clean head schema so sibling PG integration tests can run reliably in the same DB
+        command.upgrade(alembic_cfg, "head")
+        command.check(alembic_cfg)
+    finally:
+        if has_prev_url and prev_db_url is not None:
+            os.environ["DATABASE_URL"] = prev_db_url
+        else:
+            os.environ.pop("DATABASE_URL", None)
 
 
 @pytest.mark.asyncio

@@ -139,3 +139,20 @@ async def test_ollama_list_models(mock_httpx_client):
     models = await client.list_models()
     assert len(models) == 1
     assert models[0]["name"] == "qwen2.5:3b"
+
+
+@pytest.mark.asyncio
+async def test_ollama_non_json_payload_redacts_raw_response(mock_httpx_client):
+    """Verify non-JSON HTTP 200 payload from Ollama raises 502 without echoing raw content."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = "RAW_SENSITIVE_MODEL_OUTPUT_LEAK_777"
+    mock_resp.json.side_effect = ValueError("Expecting value")
+    mock_httpx_client.post = AsyncMock(return_value=mock_resp)
+
+    client = OllamaClient(http_client=mock_httpx_client)
+    with pytest.raises(OllamaInferenceError) as exc_info:
+        await client.generate(prompt="Test prompt")
+
+    assert exc_info.value.status_code == 502
+    assert "RAW_SENSITIVE_MODEL_OUTPUT_LEAK_777" not in exc_info.value.message

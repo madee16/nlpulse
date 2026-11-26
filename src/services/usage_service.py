@@ -21,10 +21,22 @@ class QuotaReservationManager:
 
     def __init__(self) -> None:
         self._locks: List[asyncio.Lock] = [asyncio.Lock() for _ in range(_NUM_QUOTA_LOCK_STRIPES)]
+        self._locks_loop: Optional[asyncio.AbstractEventLoop] = None
         self._reserved: Dict[uuid.UUID, int] = {}
+
+    def _ensure_loop_locks(self) -> None:
+        """Rebind striped locks when accessed from a different running event loop."""
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._locks_loop is not running_loop:
+            self._locks = [asyncio.Lock() for _ in range(_NUM_QUOTA_LOCK_STRIPES)]
+            self._locks_loop = running_loop
 
     def get_lock(self, developer_id: uuid.UUID) -> asyncio.Lock:
         """Select a striped lock for a given developer tenant."""
+        self._ensure_loop_locks()
         return self._locks[abs(hash(developer_id)) % _NUM_QUOTA_LOCK_STRIPES]
 
     def get_reserved(self, developer_id: uuid.UUID) -> int:
@@ -47,8 +59,13 @@ class QuotaReservationManager:
             self._reserved[developer_id] = remaining
 
     async def reset(self) -> None:
-        """Clear all active reservations (primarily for test isolation)."""
+        """Clear all active reservations and rebind locks for the active event loop."""
         self._reserved.clear()
+        self._locks = [asyncio.Lock() for _ in range(_NUM_QUOTA_LOCK_STRIPES)]
+        try:
+            self._locks_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._locks_loop = None
 
 
 quota_reservation_manager = QuotaReservationManager()

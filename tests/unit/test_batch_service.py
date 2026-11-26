@@ -454,7 +454,11 @@ async def test_batch_cancellation_releases_quota_and_preserves_m3_lifecycle(db_s
 
     reg = ModelRegistry(device_mgr=DeviceManager(preference="cpu"))
 
+    loop = asyncio.get_running_loop()
+    inference_started = asyncio.Event()
+
     def slow_sum(text: str, **kwargs):
+        loop.call_soon_threadsafe(inference_started.set)
         time.sleep(0.15)
         return [{"summary_text": "Delayed"}]
 
@@ -467,7 +471,7 @@ async def test_batch_cancellation_releases_quota_and_preserves_m3_lifecycle(db_s
     )
 
     task = asyncio.create_task(svc.run_summarization_batch(req, developer=dev))
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(inference_started.wait(), timeout=2.0)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
